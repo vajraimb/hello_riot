@@ -1,7 +1,13 @@
 # Oasis — AI 账户 + Agent 门户
 
 > 规格与初衷（Spec & Rationale）
-> 版本 0.2 · 2026-11-03 · 与代码同源，随 `docs/ai-portal-plan.md` 战报演进
+> 版本 0.3 · 2026-11-03 · 与代码同源，随 `docs/ai-portal-plan.md` 战报演进
+>
+> 0.3 相对 0.2 的变化：把"无缝切换"从两行描述扩成带状态机、适用范围、降级行为与验收标准的
+> 完整规格（§3）；修正评分算法里两处被写成"特性"的偏置（§2.3）；熔断区分瞬时故障与配额耗尽
+> （§2.4）；新增安全边界（§5）与持久化语义（§6）；§1.4 选型论证改为只声明当下已兑现的部分；
+> 末尾附 **0.3 实施清单（§8）**，每项带文件、行为与测试，可直接交给 agent 执行。
+> 标记 **[0.3 新增]** 的条款是尚未实现、等待实施的规格；未标记的条款描述当前代码行为。
 
 ---
 
@@ -23,6 +29,8 @@ Oasis 要解决的四件事：
 
 **最硬的要求**：任务执行中途 quota 耗尽（或账户故障），必须**实时切换到另一个
 模型/账户继续完成，且用户端无感**——"无缝切换"是本项目的招牌能力。
+0.3 对"无感"的准确定义见 §3.1：**客户端收到的文本流与单一账户一次完整生成等价；
+切换对用户不可见，但对运维必须可见（事件流/决策记录中显式记录）。**
 
 ### 1.2 演进：从"账户门户"到"Agent 门户"
 
@@ -40,16 +48,26 @@ Oasis 要解决的四件事：
 | 项目 | 借鉴了什么 | Oasis 的差异化 |
 |---|---|---|
 | [AIUsage](https://github.com/sylearn/AIUsage) | 账户管理、CLI 代理、会话聚合、活动盘点 | 它是手动切换；Oasis 是**自动评分调度 + 无缝切换** |
-| [Reason Machines](https://effect.grok.me) | MCP 入口、agent inbox（消息总线）、Cortex 风格过程可视化（rank 布局/S 曲线/回退回环/发光节点） | 它是云 agent + P2P 网络；Oasis 是**本地单机调度中枢**，中心化 inbox 更简单 |
-| Riot / OCaml 底层 | Actor、监督树、结构化并发 | 微秒级路由（33µs）、单二进制（9.4MB）、崩溃隔离 |
+| [Reason Machines](https://effect.grok.me) | MCP 入口、agent inbox（消息总线）、Cortex 风格过程可视化 | 它是云 agent + P2P 网络；Oasis 是**本地单机调度中枢**，中心化 inbox 更简单 |
+| Riot / OCaml 底层 | Actor、结构化并发、单二进制 | 微秒级路由、单二进制、per-request 评分 |
 
-### 1.4 底层选型：为什么 Riot/OCaml
+### 1.4 底层选型：为什么 Riot/OCaml（当下已兑现 vs 待兑现）
 
-- **Actor 模型**：每个连接/任务/agent 子进程独立 actor，崩溃不传染
-- **微秒级调度**：`route_scored` 33µs——评分调度可以**每个请求**都跑，不必缓存
-- **流式管道**：SSE 事件流经 Actor 消息天然衔接，无缝切换的"阻塞道 + 导体"模式
-  直接对应 Riot 的 `spawn_blocked` + mailbox
-- **单二进制**：一个 `oasis` 文件跑完整门户（HTTP/WS/MCP/dashboard）
+**已兑现**（代码中可验证）：
+
+- **单二进制**：一个 `oasis` 文件跑完整门户（HTTP/WS/MCP/dashboard），约 9.4MB
+- **调度足够快**：`route_scored` 约 33µs，可以每个请求都重新评分，不需要缓存决策
+- **流式导体模式**：每个流式请求一个导体 actor，上游 I/O 跑在 `spawn_blocked` 阻塞道，
+  通过 mailbox + `leg_id` 选择器把"旧 leg 的迟到消息"自然丢弃——这是无缝切换实现简洁的根本原因
+- **跨请求共享状态**用 `ConcurrentHashMap` 承载（signals / task 句柄 / session 粘性），
+  **不依赖** actor 间共享普通 map；因此熔断、并发计数在多个导体 actor 之间是生效的
+
+**待兑现**（受 Riot 0.0.43 运行时限制，见 §4.2）：
+
+- OTP 监督树接管 agent 子进程与导体 actor 的崩溃恢复。当前用 per-task blocking lane + 看门狗替代；
+  崩溃隔离目前靠"一个请求一个 actor"的粒度，而非 supervisor 重启
+
+0.2 把"Actor 崩溃隔离 / 监督树 / 结构化并发"写成选型理由，与 §4.2 的已知限制自相矛盾，0.3 改为如上表述。
 
 ---
 
@@ -66,7 +84,7 @@ Oasis 要解决的四件事：
 │   ├─ 流式导体 (无缝切换)     ├─ WS 实时事件广播        │
 │   ├─ 账户执行路径            ├─ Agent 执行路径        │
 ├─────────────────────────────────────────────────────┤
-│  核心域模块 (22 个 portal_*.ml)                      │
+│  核心域模块 (portal_*.ml)                            │
 │   Router(评分) Signals(熔断) KB(fit) Ledger(记账)    │
 │   Session(粘性) Handoff(去重拼接) Inbox(总线)        │
 │   Agent(子进程) Anthropic(协议适配) Task(异步句柄)   │
@@ -77,42 +95,77 @@ Oasis 要解决的四件事：
 └─────────────────────────────────────────────────────┘
 ```
 
+**结构债**：`portal_gateway.ml` 约 3200 行，占 portal 代码 43%，同时承载流式导体、账户执行、
+agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS。它是最难单测的模块。
+拆分计划见 §7。
+
 ### 2.2 核心概念
 
 | 概念 | 定义 |
 |---|---|
-| **Account** | 一个 API 账户：base_url / api_key_env / models / protocol（openai\|anthropic）/ thinking / rpm / 日限额 / 月预算 |
+| **Account** | 一个 API 账户：base_url / api_key_env / models / protocol（openai\|anthropic）/ thinking / rpm / 日限额 / 月预算 / **[0.3 新增]** `supports_prefill`（见 §3.2） |
 | **Agent** | 一个本地 agent CLI：command / args 模板（`{prompt}` `{model}`）/ home / workdir / timeout_s / capabilities / tier |
-| **Task profile** | 任务画像：category（general/coding/writing/analysis/long_doc）× goal（best/balanced/cheapest/fastest）× model（可选强制） |
-| **decision** | 每次调度的完整可解释记录：chosen / fallback_order / rejected（含原因）/ attempts（含状态、时延、错误）/ scores |
-| **signals** | 每账户/agent 实时信号：时延 EMA、熔断（错误率窗口 + **连续失败≥5 时间无关**）、in_flight、日请求计数 |
-| **handoff** | 无缝切换：新账户以"已发文本"为 assistant 前缀续写，前缀去重后只转发新增文本 |
+| **Task profile** | 任务画像：category（general/coding/writing/analysis/translation/long_doc）× goal（best/balanced/cheapest/fastest）× model（可选强制） |
+| **decision** | 每次调度的完整可解释记录：chosen / fallback_order / rejected（含原因）/ attempts（含状态、时延、错误）/ scores / **[0.3 新增]** handoffs（见 §3.4） |
+| **signals** | 每账户/agent 实时信号：时延 EMA、熔断（错误率窗口 + 连续失败≥5 时间无关）、in_flight、日请求计数、**[0.3 新增]** `parked_until`（配额类错误的停牌时间，见 §2.4） |
+| **handoff** | 无缝切换：新账户以"已发文本"为 assistant 前缀续写，前缀去重后只转发新增文本。完整规格见 §3 |
 
 ### 2.3 调度算法（route_scored）
 
 ```
-分数 = fit(tier × strengths 匹配, 0..100)
-     + 成本分（按 goal：cheapest 主导；价格未知为 0）
-     + 时延分（100 - EMA/20，fastest 主导）
-     - 负载分（in_flight/并发）
-候选 = 账户(或 agent)满足硬约束：模型服务 / 熔断未开 / 并发未满 / 预算未超 / 日限额未达
-选择 = 分数最高者；其余按分数排序为回退链
+候选 = 账户(或 agent) 满足硬约束：
+       模型服务 / 熔断未开 / 未停牌 / 并发未满 / 月预算未超 / 日限额未达 / rpm 未达 / 上下文放得下
+分数 = ( w_fit  × fit(tier × strengths/weaknesses, 0..100)
+       + w_cost × cost_score(候选内相对归一化, 0..100)
+       + w_lat  × latency_score(100 - EMA/20, 底 0)
+       + w_load × load_score(100 - in_flight×15, 底 0) ) / 100
+权重 = 按 goal：best 70/10/10/10 · balanced 35/25/20/20 · cheapest 20/70/5/5 · fastest 10/10/70/10
+选择 = 分数最高者（同分按配置顺序）；其余按分数排序为回退链，截断到 policy.max_fallback
 ```
 
-硬约束之外还有**粘性会话**（X-Oasis-Session 头的多轮对话钉在同一账户）与
-**显式模式**（X-Oasis-Mode: agent\|chat 覆盖类别默认规则）。
+硬约束之外还有**粘性会话**（`X-Oasis-Session` 头的多轮对话钉在同一账户）与
+**显式模式**（`X-Oasis-Mode: agent|chat` 覆盖类别默认规则）。
+
+#### 2.3.1 当前实现的两处偏置（0.2 写成了"特性"，0.3 定义为缺陷）
+
+1. **价格未知被当成最便宜**。模型不在 KB 中时 `price_nano = 0`，而 `cost_score` 按候选内
+   min/max 归一化，于是未知价格拿满分 100；在 `cheapest`（w_cost = 70）下它几乎必胜。
+   **[0.3 新增] 修正**：价格未知的候选不参与归一化区间计算，其 `cost_score` 固定为 50（中性），
+   并在 decision.scores 旁记 `price_known=false`。
+2. **当前 cheapest 实际不生效**。`oasis.toml` 中所有价格为 0，`max_price = min_price` 时全员
+   `cost_score = 100`，cheapest 退化为 fit 20 / lat 5 / load 5。0.2 §3.4 "填上后成本调度才精确"
+   应改为"填上前成本调度不生效"。**[0.3 新增]**：启动时若 goal 为 cheapest 且 KB 中已知价格的
+   模型 < 2 个，日志打 WARN；`GET /api/accounts` 返回 `cost_routing_effective: false`。
+
+#### 2.3.2 时延分的量纲问题
+
+`latency_score = 100 - EMA/20`：EMA ≥ 2000ms 即归零。API 账户首字节通常 200–1500ms，有区分度；
+本地 agent 任务动辄 30–300s，**所有 agent 在 fastest 下时延分恒为 0**，fastest 对 agent 池无意义。
+**[0.3 新增]**：agent 池使用 `latency_score_agent = 100 - EMA/2000`（每 2s 扣 1 分），
+两套量纲在 `route_scored` 调用处由 pool 类型选择。
 
 ### 2.4 执行与容错
 
 - **非流式**：按回退链逐个尝试（blocking lane + 超时），全程记账/信号/决策记录
-- **流式（账户）**：导体 actor 管理当前 leg；上游断流/错误 → 触发 handoff：
-  新账户以"已发送文本"续写，`Portal_handoff` 前缀去重，客户端零重复
-- **流式（agent）**：子进程 stdout 逐行 → 文本提取（claude stream-json 解析，
-  思考不外泄）→ 客户端 delta；心跳保活（10s 空 chunk）；看门狗 SIGKILL 兜底
-- **失败隔离**：HTTP 错误/余额不足（429 1113 等）→ 记入 signals；连续 5 次失败
-  时间无关熔断 → 30s 冷却 → 半开探测
+- **流式（账户）**：导体 actor 管理当前 leg；上游断流/错误 → 触发 handoff（§3）
+- **流式（agent）**：子进程 stdout 逐行 → 文本提取（claude stream-json 解析，思考不外泄）→
+  客户端 delta；心跳保活（10s 空 chunk）；看门狗 SIGKILL 兜底
 - **异步任务**（MCP agent 任务默认）：秒回 task_id → `oasis_task_status` 轮询
   running/done/failed——解决"MCP 客户端超时 < agent 执行时长"的矛盾
+
+#### 2.4.1 失败分类与熔断 **[0.3 新增]**
+
+0.2 把所有失败一视同仁：连续 5 次 → 熔断 30s → 半开探测。这对 5xx/超时合理，
+对"今天没钱了"（z.ai 429 code 1113、OpenAI `insufficient_quota`、Anthropic `rate_limit_error` 带
+daily 语义）是**每 30s 烧一次请求并污染时延 EMA**。0.3 区分三类：
+
+| 类别 | 识别规则 | 处理 |
+|---|---|---|
+| **transient**（瞬时） | 5xx、连接失败、读超时、流中断且无配额特征 | 现有熔断：窗口错误率或连续 5 次 → Open 30s → Half_open 单探测 |
+| **quota**（配额/余额） | HTTP 429 且 body 含 `1113` / `insufficient_quota` / `balance` / `credit`；HTTP 402；provider 自定义码表（配置 `quota_error_codes`） | `parked_until` = 下一 UTC 日 00:00（日配额）或下月 1 日（月预算，由错误文本/配置决定，默认日）；停牌期间视为硬约束不通过，reject 原因 `quota_parked`；不计入时延 EMA |
+| **client**（请求本身错） | 4xx 非 429/402（400 参数错、401/403 密钥错、413 过长） | 不触发熔断；401/403 额外写 `auth_invalid` 信号并在 `/api/accounts` 显示；不进入回退链（换账户也会失败的错误除外：413 可回退到更大 context 的账户） |
+
+识别函数 `Portal_signals.classify_error : status:int option -> body:string -> error_class` 为纯函数、可单测。
 
 ### 2.5 对外接口
 
@@ -122,57 +175,315 @@ Oasis 要解决的四件事：
 | `GET /v1/models` | KB 模型列表 |
 | `POST /mcp` | MCP（JSON-RPC 2.0 / Streamable HTTP 简化）11 工具：oasis_ask、oasis_agent_task、oasis_task_status、oasis_status、oasis_decisions、oasis_send_message、oasis_check_inbox、oasis_ask_user、oasis_activity、oasis_agents、oasis_models |
 | `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点）、activity（时间线）、requests（审计） |
-| `WS /ws` | 实时推送：decision + 事件流（task_started → routed → attempt_started → attempt_finished → task_done）驱动前端过程图 |
-| `GET /` | Dashboard：ask 面板 + 账户状态 + 决策流 + **Cortex 风格过程图** + agent 盘点 + 活动时间线 + 收件箱 |
+| `WS /ws` | 实时推送：decision + 事件流（task_started → routed → attempt_started → attempt_finished → **[0.3 新增]** handoff → task_done）驱动前端过程图 |
+| `GET /` | Dashboard：ask 面板 + 账户状态 + 决策流 + Cortex 风格过程图 + agent 盘点 + 活动时间线 + 收件箱 |
 
-### 2.6 前端过程图（可视化规格）
+**[0.3 新增]** 所有非 `GET /` 与非静态资源的接口受 §5 的鉴权约束。
 
-- **事件驱动**：五种事件经 WS 驱动 SVG 图，从发问瞬间到任务完成逐步生长
-- **布局**：rank 分层（任务→候选→尝试），每层均分宽度（借鉴 effect.grok.me Cortex）
-- **边**：S 曲线 + 哈希抖动防重叠；**失败回退 = 向左外绕 110px 的回环虚线**
-- **节点**：径向渐变 soma + `feGaussianBlur` 发光（执行中青色脉动；成功绿 ✓；
-  失败红 ✗；候选灰蓝；被拒灰红）
-- 纯 SVG/CSS，零外部依赖
+### 2.6 前端过程图
+
+事件驱动的 SVG 过程图（rank 分层、S 曲线边、回退回环、发光节点，零外部依赖）。
+视觉细节（曲线偏移像素、渐变色值等）从 spec 移出，归入 `docs/ai-portal-plan.md` §16.25。
+spec 只约束**语义**：
+
+- 五类事件各有独立节点状态：候选（灰蓝）/ 执行中（青色脉动）/ 成功（绿）/ 失败（红）/ 被拒（灰红）
+- **[0.3 新增]** `handoff` 事件在图上表现为"失败节点 → 新尝试节点"的回环边，并在节点上标注
+  `prefix_matched` 字节数与 `diverged` 状态，使 handoff 质量可视
 
 ### 2.7 配置（oasis.toml）
 
 ```toml
-[server]          # host / port / data_dir
+[server]          # host / port / data_dir / [0.3] auth_token_env
 [[models]]        # KB：name/tier/strengths/weaknesses/context/max_output/latency/价格(nano)
 [[accounts]]      # 见 2.2；protocol="anthropic" 走适配器；thinking="disabled" 关思考
+                  # [0.3] supports_prefill = true|false（默认 anthropic=true, openai=false）
+                  # [0.3] quota_error_codes = ["1113"]（可选，provider 自定义配额错误码）
 [[agents]]        # 见 2.2；enabled=false 的 agent 不进候选池
+                  # [0.3] allowed_workdirs = ["/home/u/proj"]（见 §5）
 [[routes]]        # category -> 账户链
 [policy]          # goal / agent_categories（自动走 agent 池的类别）/ max_fallback
+                  # [0.3] max_handoffs = 2 / session_ttl_s
 ```
 
 密钥只通过环境变量注入（`api_key_env`），**永不落盘到配置**。
 
 ---
 
-## 3. 已知限制（诚实清单）
+## 3. 无缝切换（handoff）规格 **[0.3 新增章节]**
+
+### 3.1 目标与保证
+
+**目标**：流式请求执行中上游死亡（断流 / 429 / 5xx）时，客户端收到的最终文本与
+"某一个账户一次完整生成"在语义上等价，且**不出现重复段落、不出现截断的多字节字符、
+SSE 帧格式始终合法**。
+
+**保证分级**（spec 只承诺能验证的）：
+
+| 级别 | 条件 | 保证 |
+|---|---|---|
+| **G1 精确续写** | 回退账户支持 assistant prefill 且逐字节复述或直接续写 | 客户端零重复、零丢失 |
+| **G2 近似续写** | 回退账户支持 prefill，但复述时改写了前缀（标点/空格/同义） | 从分叉点起转发；客户端可能看到 ≤ 一个句子的重叠。decision 记 `diverged=true, matched_bytes=N` |
+| **G3 重新作答** | 回退账户不支持 prefill，或分叉发生在前缀 < 20% 处 | 不拼接。关闭当前流前先发 `[Oasis: 上游中断，已切换到 <account> 重新生成]` 的 delta（可配置关闭），再以空 sent_text 重新开始。用户可见但不丢任务 |
+| **G0 失败** | 回退链耗尽或 handoff 次数达上限 | `finish_failed`：发送 SSE error 事件 + `[DONE]`；decision 状态 failed |
+
+0.2 的"客户端零重复"只在 G1 成立。0.3 要求 decision 记录实际达到的级别。
+
+### 3.2 适用范围
+
+handoff 仅在**全部满足**时启用，否则按 G3 处理（重新作答）或直接 G0：
+
+- 请求无 `tools` / `tool_choice` / `response_format: json_*`（前缀续写对结构化输出不成立）
+- 当前已发送文本 `sent_text` 非空（为空时直接换账户重试，不是 handoff）
+- 回退账户 `supports_prefill = true`（默认：`protocol="anthropic"` 为 true；openai 协议默认 false，
+  DeepSeek 需显式 `supports_prefill = true` 并由适配器附加 `prefix: true` beta 字段）
+- 已切换次数 < `policy.max_handoffs`（默认 2，与当前代码一致）
+
+**模型选择**：回退 leg 使用回退账户服务的、**与原请求 task.model 相同的模型**；若该账户不服务
+该模型，用其首个模型（当前行为），并在 decision 记 `model_changed=true`。
+
+**thinking 模型**：handoff 时对回退账户强制 `thinking="disabled"`（思考模型通常拒绝 prefill 或
+会在前缀前输出思考块）。
+
+### 3.3 导体状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> Routing
+    Routing --> Streaming: start_next (leg N)
+    Streaming --> Streaming: Upstream_chunk(leg N) 转发 delta
+    Streaming --> Done: done sentinel + Upstream_ended
+    Streaming --> Failed_leg: Upstream_failed / Head 4xx|5xx / receive 超时 120s
+    Failed_leg --> Routing: sent_text 为空 (普通重试)
+    Failed_leg --> Handoff_init: sent_text 非空 且 handoffs < max 且 回退账户 prefill 可用
+    Failed_leg --> Restart_notice: sent_text 非空 且 回退账户 prefill 不可用 (G3)
+    Failed_leg --> Failed: 回退链耗尽 或 handoffs >= max (G0)
+    Handoff_init --> Streaming: 带 assistant 前缀发起 leg N+1；Portal_handoff.init(sent_text)
+    Restart_notice --> Streaming: 发切换提示 delta；sent_text 清空；leg N+1
+    Done --> [*]
+    Failed --> [*]
+```
+
+旧 leg 的迟到消息由 `leg_id` 选择器丢弃；`receive` 超时 120s 视为 `Upstream_failed`。
+
+### 3.4 去重器（Portal_handoff）规格
+
+当前实现是逐字节匹配：匹配中累加 `match_pos`，第一个不匹配字节起 `diverged=true` 全量转发。
+0.3 补三条：
+
+1. **UTF-8 边界安全**：`feed` 转发的字节串必须在 UTF-8 字符边界切分。分叉发生在多字节字符中间时，
+   回退到该字符起始字节再转发（即转发完整字符，而不是尾部若干字节）。同样，每次 `feed` 若 chunk
+   末尾是不完整的多字节序列，暂存到下次 `feed`，不单独发出
+2. **分叉位置阈值**：`diverged` 发生在 `0 < match_pos < 0.2 × sent_len` 时，视为回退模型"重新作答"
+   （G3），返回信号 `Restart` 让导体走 Restart_notice 路径，而不是把一整段近似重复文本转发给客户端。
+   `match_pos == 0`（首字节即分叉）需进一步区分"直接续写"与"重新作答"，规则见 §3.6 H2 注
+3. **状态外露**：`t` 新增 `matched_bytes` / `diverged_at` 只读访问器，供 decision 记录
+
+decision 新增字段：
+
+```json
+"handoffs": [
+  { "from": "deepseek", "to": "kimi", "reason": "stream_failed",
+    "sent_bytes": 1832, "matched_bytes": 1832, "diverged": false,
+    "level": "G1", "model_changed": false, "at_ms": 1730000000000 }
+]
+```
+
+WS 事件流新增 `handoff` 事件，payload 同上一条。
+
+### 3.5 与粘性会话的交互
+
+`X-Oasis-Session` 钉住的账户在流中失败时：
+
+- 本次请求按 §3.3 切换；**切换成功后 pin 迁移到新账户**（当前代码已在 handoff 成功时重新 pin，
+  0.3 明确为规格）
+- 若失败类别为 quota（§2.4.1），pin 迁移且原账户进入停牌，后续轮次不会再回到它
+- 若为 transient，pin 迁移；原账户熔断恢复后**不**自动迁回（避免同一会话在两个模型间来回跳）
+
+### 3.6 验收测试（基于 Portal_mock，必须全部通过）
+
+`portal_mock` 已支持 `cut_after_bytes` 断流与 429 场景。0.3 要求以下用例进入 `portal_tests.ml`：
+
+| 用例 | 场景 | 断言 |
+|---|---|---|
+| H1 精确续写 | mock_a 在 N 字节断流；mock_b 复述前缀后续写 | 客户端拼接文本 == mock_b 完整文本；decision.handoffs[0].level == G1 |
+| H2 直接续写 | mock_b 不复述前缀直接输出新文本 | 客户端文本 == 前缀 + 新文本；`classify` 判为直接续写 → level G1；matched_bytes == 0（见注：首字节即分叉但不是重新作答） |
+| H3 多字节边界 | 断流点与分叉点都落在一个 3 字节汉字中间 | 客户端每个 SSE delta 的 content 都是合法 UTF-8；拼接文本无 U+FFFD |
+| H4 近似续写 | mock_b 复述时把前缀某处标点改掉 | level G2；客户端文本重叠 ≤ 分叉点到前缀末尾长度 |
+| H5 重新作答 | mock_b 第 3 字节即分叉且后续与前缀无公共前缀 | 走 Restart_notice；客户端收到提示 delta 后文本重新开始；level G3 |
+| H6 上限 | mock_a、mock_b、mock_c 连续断流 | 第 3 次不再 handoff；SSE error + [DONE]；decision failed；handoffs.length == 2 |
+| H7 不适用 | 请求带 `tools` | 断流后不走 handoff，直接 G3 或 G0；handoffs 为空 |
+| H8 pin 迁移 | 带 X-Oasis-Session，mock_a 断流切到 mock_b | 第二轮请求直接路由到 mock_b |
+
+注（H2）：区分"直接续写"与"重新作答"需要启发式：直接续写时回退输出的前若干字节与
+`sent_text` **末尾**衔接自然（无法纯文本判定），而重新作答通常以与 `sent_text` **开头**相似但不等的
+文本开始。0.3 的规则：分叉在 `match_pos == 0` 且回退输出前 32 字节与 `sent_text` 前 32 字节的
+编辑距离 > 16 → 直接续写（G1）；否则 → 重新作答（G3）。该启发式作为 `Portal_handoff.classify`
+纯函数实现并单测。
+
+---
+
+## 4. 已知限制（诚实清单）
+
+### 4.1 环境类
 
 1. **本机 agent CLI 可用性**是环境问题：claude 需登录且 `-p` 需 `--verbose`
    + `--dangerously-skip-permissions`；opencode/gemini 在本机有自身 bug/网络问题
    （已通过 `enabled=false` 隔离，修好即可用）
-2. **Riot 0.0.43 运行时限制**（docs §16.20 有完整证据链）：测试 actor 里 spawn
-   挂起、跨 actor 共享 map 不可见、Supervisor.Dynamic.start_child 挂起——因此
-   agent 执行采用 per-task blocking-lane + 看门狗，OTP 监督树集成留待运行时修复
-3. **riot 工具链缓存坑**：lib 改动后 `riot test`/`riot run` 可能跑旧产物，
+2. **riot 工具链缓存坑**：lib 改动后 `riot test`/`riot run` 可能跑旧产物，
    **改 lib 后必须 `riot clean --force` 重建**；启动网关用
    `_build/.../out/portal/oasis` 正规产物
-4. 价格字段目前大多为 0（各家真实价格待填）——填上后成本调度才精确
-5. GLM 账户余额不足（z.ai 429/1113）时由熔断自动隔离；ZCode 的 bigmodel 登录态
+3. GLM 账户余额不足（z.ai 429/1113）时由停牌机制（§2.4.1）隔离；ZCode 的 bigmodel 登录态
    不落盘，无法直接复用（z.ai anthropic 端点是可用路径）
+
+### 4.2 运行时类
+
+4. **Riot 0.0.43 运行时限制**（`docs/ai-portal-plan.md` §16.20 有完整证据链）：测试 actor 里 spawn
+   挂起、跨 actor 共享普通 map 不可见、`Supervisor.Dynamic.start_child` 挂起——因此
+   agent 执行采用 per-task blocking-lane + 看门狗，OTP 监督树集成留待运行时修复。
+   跨请求共享状态统一走 `ConcurrentHashMap`（§1.4）
+
+### 4.3 数据类
+
+5. **价格字段目前全部为 0**——成本调度当前**不生效**（§2.3.1），填上后才生效
+6. 输出 token 计数为 `bytes / 4` 估算，中文场景偏差可达 2–3 倍；记账以上游返回的 `usage` 为准，
+   仅在上游未返回时用估算（**[0.3 新增]** 非流式已可读 usage；流式需解析末尾 usage chunk）
 
 ---
 
-## 4. 演进路线（已完成 / 待做）
+## 5. 安全边界 **[0.3 新增章节]**
 
-- [x] M0–M3：四层栈复用、评分调度、无缝切换、可解释决策
+Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务。
+**任何能访问其端口的进程等价于拿到本机 shell**。0.2 只写了"密钥不落盘"，不够。
+
+### 5.1 网络面
+
+- `server.host` 默认 `127.0.0.1`（当前已是）；配置为非回环地址时启动打 WARN 并**强制要求** `auth_token_env`
+- **[0.3 新增]** `server.auth_token_env`：设置后，`/v1/*`、`/mcp`、`/api/*`（`reload` 在内）、`/ws`
+  必须带 `Authorization: Bearer <token>` 或 `?token=`（仅 WS）；`GET /` dashboard 页面本身不鉴权，
+  但其 JS 从 `localStorage` 读 token 附到请求头。未设置时仅允许回环地址连接（拒绝非回环 peer）
+- `GET /api/reload` 改为 `POST`（当前为 GET，可被 `<img src>` 触发）
+
+### 5.2 Agent 执行面
+
+- **[0.3 新增]** `agents[].allowed_workdirs`：请求指定 workdir 时必须是列表内路径或其子目录
+  （规范化后前缀匹配，拒绝 `..`）；未配置时只允许 agent 默认 `workdir`
+- `oasis_agent_task` 的 prompt 在写入子进程 argv 前**不做模板展开以外的任何处理**；
+  `{prompt}` 作为单个 argv 元素传入，不经 shell
+- agent 子进程继承的环境变量白名单：`HOME`（或 agent.home）、`PATH`、`LANG`、`TERM`，
+  **不继承** Oasis 自身的 `*_API_KEY`（当前继承全部环境，**[0.3 新增]** 改为白名单）
+
+### 5.3 消息总线（inbox）注入面
+
+`oasis_send_message` → agent `oasis_check_inbox` → agent 执行其中内容，是一条 prompt injection 路径。
+**[0.3 新增]**：
+
+- inbox 条目带 `from` 字段，agent 读取时 Oasis 在每条前注入 `[来自 <from>，未经验证的消息]` 前缀
+- `oasis_send_message` 受 §5.1 鉴权约束（同一 token 下视为可信来源，但仍带前缀）
+- inbox 条目长度上限 16KB，超出截断并标记 `truncated=true`
+
+### 5.4 日志与审计
+
+- `/api/requests` 审计记录**不含**消息正文（只有长度、hash 前 8 位、category、账户、状态）
+- 上游 `Authorization` 头在任何日志路径（含 debug）中以 `Bearer ****` 脱敏
+
+---
+
+## 6. 持久化语义 **[0.3 新增章节]**
+
+| 数据 | 位置 | 方式 | 跨重启 | 说明 |
+|---|---|---|---|---|
+| ledger（账本） | `<data_dir>/ledger.jsonl` | 快照重写 | 保留 | 月预算/日限额依赖它；重启不清零 |
+| inbox | `<data_dir>/inbox/<agent>.jsonl` | 追加 | 保留 | 已读标记仅内存；**[0.3 新增]** 重启后按 `read_at` 字段恢复 |
+| signals（EMA/熔断/in_flight） | 内存 `ConcurrentHashMap` | — | 丢失 | 重启后熔断清零是**预期行为**；**[0.3 新增]** `parked_until` 例外，持久化到 `<data_dir>/parked.json`，否则重启会让已没钱的账户重新进池 |
+| session pin | 内存 | — | 丢失 | TTL 由 `policy.session_ttl_s` 控制 |
+| decisions | 内存环形缓冲 | — | 丢失 | **[0.3 新增]** 追加写 `<data_dir>/decisions.jsonl`，保留最近 N=1000 条，供事后分析 handoff 质量 |
+| task 句柄 | 内存 | — | 丢失 | 重启后 `oasis_task_status` 对旧 task_id 返回 `unknown`，不返回 failed |
+
+**decision schema 版本**：每条 decision 带 `"schema": 2`（0.2 为隐式 1）；新增字段只增不改，
+消费者忽略未知字段。
+
+---
+
+## 7. 结构演进：拆分 portal_gateway.ml
+
+按职责拆为（纯重构，行为不变，每步可独立合并）：
+
+| 新模块 | 从 gateway 迁出 | 可测性 |
+|---|---|---|
+| `portal_conductor.ml` | 流式导体状态机（§3.3）、handoff 编排 | 用 mock 上游驱动，§3.6 用例在此跑 |
+| `portal_exec_account.ml` | 非流式账户执行、回退链循环 | mock 429/5xx |
+| `portal_exec_agent.ml` | agent 子进程驱动、stream-json 解析、心跳 | 用 `echo`/脚本假 agent |
+| `portal_http.ml` | Trail 路由、/v1 /api /mcp 分发、鉴权中间件（§5.1） | 请求级单测 |
+| `portal_ws.ml` | WS 连接管理、事件广播 | — |
+| `portal_dashboard.ml` | 内嵌 HTML/JS 字符串 | 无逻辑 |
+
+拆分顺序：先 conductor（为 §3 验收测试铺路），再 http（为 §5 鉴权铺路），其余随需。
+
+---
+
+## 8. 0.3 实施清单（交给 agent 执行）
+
+每项独立可合并；标注依赖。文件路径以 `packages/portal/` 为根。
+**改 lib 后必须 `riot clean --force` 再 `riot test`**（§4.1）。
+
+### P0 — 招牌能力正确性
+
+| # | 任务 | 文件 | 行为 | 测试 |
+|---|---|---|---|---|
+| 1 | handoff UTF-8 边界安全 | `src/portal_handoff.ml` | `feed` 在字符边界切分；不完整尾字节暂存；新增 `matched_bytes`/`diverged_at` 访问器 | `tests/portal_tests.ml`：H3；随机 UTF-8 前缀 + 随机分叉点属性测试 100 轮无非法序列 |
+| 2 | 重新作答识别 | `src/portal_handoff.ml` | `classify : sent:string -> head:string -> [G1\|G2\|G3]`（§3.4 规则 2 与 H2 注） | H2、H4、H5 的分类断言 |
+| 3 | 导体接入 G3 路径与 handoff 记录 | `src/portal_gateway.ml`（或拆出的 `portal_conductor.ml`） | Restart_notice 分支；decision.handoffs；WS `handoff` 事件；回退 leg 优先使用原 task.model；thinking 强制 disabled | H1–H8 全部 |
+| 4 | `supports_prefill` 与适用范围 | `src/portal_config.ml`、`src/portal_gateway.ml` | 新配置字段 + 默认值；`tools`/`response_format` 检测；DeepSeek `prefix: true` 适配 | H7；配置解析单测 |
+| 5 | Portal_mock 增加续写场景 | `src/portal_mock.ml` | 场景字段：`echo_prefix: exact \| mutated \| none \| restart` | 支撑 H1–H6 |
+
+### P1 — 评分与熔断语义
+
+| # | 任务 | 文件 | 行为 | 测试 |
+|---|---|---|---|---|
+| 6 | 价格未知中性化 | `src/portal_router.ml` | 未知价格不入 min/max；`cost_score = 50`；scores 带 `price_known` | 两个已知价 + 一个未知价在 cheapest 下，未知价不应胜出 |
+| 7 | cheapest 无效告警 | `src/portal_gateway.ml`、`src/oasis.ml` | 启动 WARN；`/api/accounts.cost_routing_effective` | 配置全 0 价格时字段为 false |
+| 8 | agent 池时延量纲 | `src/portal_router.ml` | `latency_score_agent`；按 pool 选择 | 30s 与 120s EMA 的 agent 在 fastest 下分数不同 |
+| 9 | 失败分类 + 停牌 | `src/portal_signals.ml`、`src/portal_router.ml`、`src/portal_config.ml` | `classify_error`；`parked_until`；reject 原因 `quota_parked`；`quota_error_codes` 配置；quota 不进 EMA | 429+1113 → parked 到次日 0 点；500 → 现有熔断；401 → 不熔断且 `auth_invalid` |
+| 10 | parked 持久化 | `src/portal_signals.ml` | `<data_dir>/parked.json` 读写 | 重启后仍 parked |
+
+### P2 — 安全
+
+| # | 任务 | 文件 | 行为 | 测试 |
+|---|---|---|---|---|
+| 11 | Bearer 鉴权 | `src/portal_gateway.ml`（或 `portal_http.ml`）、`src/portal_config.ml` | `auth_token_env`；非回环 host 强制要求；WS `?token=`；dashboard JS 附头 | 无 token 401；错 token 401；对 token 200；未配置时非回环 peer 403 |
+| 12 | reload 改 POST | 同上 | `GET /api/reload` → 405 | 单测 |
+| 13 | agent workdir 白名单 + env 白名单 | `src/portal_agent.ml`、`src/portal_config.ml` | `allowed_workdirs` 前缀匹配；子进程 env 白名单 | `..` 路径拒绝；子进程看不到 `DEEPSEEK_API_KEY` |
+| 14 | inbox 注入前缀与长度上限 | `src/portal_inbox.ml`、`src/portal_mcp.ml` | 读取时加 `[来自 X，未经验证的消息]`；16KB 截断 | 单测 |
+| 15 | 审计脱敏 | `src/portal_gateway.ml` | `/api/requests` 不含正文；日志 `Bearer ****` | 单测 grep 日志无密钥 |
+
+### P3 — 持久化与结构
+
+| # | 任务 | 文件 | 行为 | 测试 |
+|---|---|---|---|---|
+| 16 | decisions.jsonl + schema 字段 | `src/portal_gateway.ml` | 追加写，保留 1000 条；`"schema": 2` | 重启后 `/api/decisions` 可读历史 |
+| 17 | inbox 已读恢复 | `src/portal_inbox.ml` | 追加 `read_at` 行；启动时重放 | 重启后未读数一致 |
+| 18 | 流式 usage 解析 | `src/portal_gateway.ml`、`src/portal_anthropic.ml` | 读末尾 usage chunk 替代 `len/4` | mock 返回 usage 时 ledger 用真实值 |
+| 19 | 拆分 gateway（§7） | 新建 6 个模块 | 纯重构 | 现有测试全绿；行数：gateway < 500 |
+
+### 验收门槛
+
+- `riot test` 全绿，新增用例 H1–H8 与 P1/P2 各项测试均存在且通过
+- `riot bench` 中 `route_scored` 仍 < 100µs（新增分类/停牌检查不应使其超过 3 倍）
+- 对 `oasis.toml` 的新增字段均有默认值，**0.2 配置文件无需修改即可启动**
+
+---
+
+## 9. 演进路线（已完成 / 待做）
+
+- [x] M0–M3：四层栈复用、评分调度、无缝切换（G1 级）、可解释决策
 - [x] 真实账户接入：DeepSeek / Kimi Work / GLM z.ai（Anthropic 适配）/ OpenRouter
 - [x] Agent 门户：本地 agent 池、回退链、异步任务句柄
 - [x] MCP 入口（11 工具）+ 消息总线（inbox/ask_user）+ 发现 + 活动聚合
 - [x] 事件流 + Cortex 风格过程图
-- [ ] 真实价格填充（成本调度闭环）
+- [ ] **0.3 P0**：handoff 分级保证（G1/G2/G3）+ UTF-8 安全 + 验收测试 H1–H8
+- [ ] **0.3 P1**：评分偏置修正 + 失败分类/停牌
+- [ ] **0.3 P2**：鉴权 + agent 沙箱边界 + inbox 注入防护
+- [ ] **0.3 P3**：持久化补全 + gateway 拆分
+- [ ] 真实价格填充（成本调度闭环；依赖 P1-6/7 使其行为正确）
 - [ ] 监督树（待 Riot 运行时修复）
 - [ ] 云端 agent 账户（异步任务模型已就绪）
