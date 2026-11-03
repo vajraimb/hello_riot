@@ -9,23 +9,68 @@ module Atacama = Hello_riot.Atacama
     5xx, SSE streams, latency, and — critically — a mid-stream connection cut
     (quota-exhausted upstream death) via [cut_after_bytes]. *)
 
+(** How a streaming fallback treats the assistant prefix it was handed:
+    [Echo_exact] re-emits it verbatim before [sse], [Echo_mutated] re-emits
+    it with one character changed at ~60% of its length (a drifting replay),
+    [No_echo] emits only [sse]. *)
+type echo =
+  | No_echo
+  | Echo_exact
+  | Echo_mutated
+
 type scenario = {
   status: int;
   body: string;
   sse: string list;
   cut_after_bytes: int;
   delay_ms: int;
+  echo_prefix: echo;
 }
 
 let default_scenario =
-  { status = 200; body = "{}"; sse = []; cut_after_bytes = 0; delay_ms = 0 }
+  { status = 200; body = "{}"; sse = []; cut_after_bytes = 0; delay_ms = 0; echo_prefix = No_echo }
 
 type t = {
   pool: Atacama.pool;
   scenario: scenario Sync.Atomic.t;
+  last_request: string Sync.Atomic.t;
 }
 
 let set_scenario = fun t scenario -> Sync.Atomic.set t.scenario scenario
+
+(** Body of the most recent request this mock received. *)
+let last_request = fun t -> Sync.Atomic.get t.last_request
+
+(** Content of the trailing assistant message in an OpenAI or Anthropic
+    request body, if any. *)
+let assistant_prefix = fun body ->
+  match Std.Data.Json.from_string body with
+  | Error _ -> None
+  | Ok j -> (
+      match
+        Std.Data.Json.get_field "messages" j
+        |> Option.and_then ~fn:Std.Data.Json.get_array
+        |> Option.map ~fn:List.rev
+        |> Option.and_then ~fn:List.head
+      with
+      | None -> None
+      | Some m -> (
+          match Std.Data.Json.get_field "role" m |> Option.and_then ~fn:Std.Data.Json.get_string with
+          | Some "assistant" ->
+              Std.Data.Json.get_field "content" m |> Option.and_then ~fn:Std.Data.Json.get_string
+          | _ -> None
+        )
+    )
+
+let mutate_at_60pct = fun s ->
+  let len = String.length s in
+  if len = 0 then
+    s
+  else
+    let i = len * 3 / 5 in
+    let c = String.get_unchecked s ~at:i in
+    let c' = if Char.equal c 'X' then 'Y' else 'X' in
+    String.sub s ~offset:0 ~len:i ^ String.from_char c' ^ String.sub s ~offset:(i + 1) ~len:(len - i - 1)
 
 let stop = fun t -> Atacama.stop t.pool
 
@@ -95,8 +140,25 @@ let write_raw = fun stream payload ->
   in
   loop 0
 
+let content_length = fun head ->
+  String.split ~by:"\r\n" head
+  |> List.filter_map ~fn:(fun line ->
+    match String.index_of line ~char:':' with
+    | None -> None
+    | Some i ->
+        let name = String.sub line ~offset:0 ~len:i |> String.trim |> String.lowercase_ascii in
+        if String.equal name "content-length" then
+          String.sub line ~offset:(i + 1) ~len:(String.length line - i - 1)
+          |> String.trim
+          |> Int.from_string_opt
+        else
+          None)
+  |> List.head
+  |> Option.unwrap_or ~default:0
+
 let start = fun ?(host = "127.0.0.1") ?(port = 0) () ->
   let scenario = Sync.Atomic.make default_scenario in
+  let last_request = Sync.Atomic.make "" in
   let module H : Atacama.Handler = struct
     type state = {
       buf: string;
@@ -113,8 +175,20 @@ let start = fun ?(host = "127.0.0.1") ?(port = 0) () ->
       let buf = state.buf ^ chunk in
       match find_header_end buf with
       | None -> Ok (Atacama.Continue, { buf })
-      | Some _idx ->
+      | Some idx when String.length buf < idx + 4 + content_length (String.sub buf ~offset:0 ~len:idx) ->
+          Ok (Atacama.Continue, { buf })
+      | Some idx ->
+          let body_len = content_length (String.sub buf ~offset:0 ~len:idx) in
+          let req_body = String.sub buf ~offset:(idx + 4) ~len:body_len in
+          Sync.Atomic.set last_request req_body;
           let sc = Sync.Atomic.get scenario in
+          let sse =
+            match (sc.echo_prefix, assistant_prefix req_body) with
+            | (Echo_exact, Some p) -> p :: sc.sse
+            | (Echo_mutated, Some p) -> mutate_at_60pct p :: sc.sse
+            | _ -> sc.sse
+          in
+          let sc = { sc with sse } in
           if sc.delay_ms > 0 then sleep (Time.Duration.from_millis sc.delay_ms);
           let written = ref 0 in
           (* Cut-aware write: when [cut_after_bytes] is set, at most the
@@ -204,4 +278,4 @@ let start = fun ?(host = "127.0.0.1") ?(port = 0) () ->
       ()
   with
   | Error e -> Error e
-  | Ok pool -> Ok { pool; scenario }
+  | Ok pool -> Ok { pool; scenario; last_request }

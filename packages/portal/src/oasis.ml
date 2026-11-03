@@ -511,6 +511,10 @@ let run_self_test = fun () ->
                 tpm = 0;
                 daily_limit = 0;
                 monthly_budget_nano = 0;
+                supports_prefill = true;
+                quota_error_codes = [];
+                quota_reset = "daily";
+                stream_usage = false;
               }
             in
             let config =
@@ -518,6 +522,7 @@ let run_self_test = fun () ->
                 Portal.Config.server_host = "127.0.0.1";
                 server_port = 0;
                 data_dir = "./.oasis-selftest-data";
+                auth_token_env = None;
                 agents = [];
                 accounts = [ mk_account "mock_a" mock_a.pool.port; mk_account "mock_b" mock_b.pool.port ];
                 kb;
@@ -527,6 +532,9 @@ let run_self_test = fun () ->
                     routes = [ { Portal.Config.category = "general"; accounts = [ "mock_a"; "mock_b" ] } ];
                     agent_categories = [ "coding" ];
                     max_fallback = 1;
+                    max_handoffs = 2;
+                    handoff_notice = true;
+                    session_ttl_s = 600;
                   };
               }
             in

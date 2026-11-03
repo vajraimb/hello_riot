@@ -35,6 +35,10 @@ let mk_account = fun ~models ~budget name ->
     tpm = 0;
     daily_limit = 0;
     monthly_budget_nano = budget;
+    supports_prefill = false;
+    quota_error_codes = [];
+    quota_reset = "daily";
+    stream_usage = false;
   }
 
 let bench_config =
@@ -42,6 +46,7 @@ let bench_config =
     Portal.Config.server_host = "127.0.0.1";
     server_port = 0;
     data_dir = "./.oasis-bench-data";
+    auth_token_env = None;
     agents = [];
     accounts =
       [
@@ -56,6 +61,9 @@ let bench_config =
         routes = [];
         agent_categories = [ "coding" ];
         max_fallback = 2;
+        max_handoffs = 2;
+        handoff_notice = true;
+        session_ttl_s = 600;
       };
   }
 
@@ -70,6 +78,7 @@ let bench_lookups =
           in_flight = 0;
           breaker_open = false;
           requests_in_window = 0;
+          parked = false;
         });
   }
 

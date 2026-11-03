@@ -25,6 +25,8 @@ type agent = {
   latency: string;
   enabled: bool;
   concurrency_limit: int;
+  allowed_workdirs: string list;
+  env_passthrough: string list;
 }
 
 type Message.t +=

@@ -169,6 +169,115 @@ let test_handoff_incremental_property = fun _ctx ->
   Test.assert_equal ~expected:" tail-end" ~actual:multi;
   Ok ()
 
+
+let handoff_feed_all = fun ~sent pieces ->
+  let rec go st acc = function
+    | [] ->
+        let (last, st') = Handoff.finish st in
+        let s = match last with Handoff.Forward s | Handoff.Restart_with s -> s in
+        (List.rev (s :: acc), st')
+    | p :: rest ->
+        let (step, st') = Handoff.step st p in
+        let s = match step with Handoff.Forward s | Handoff.Restart_with s -> s in
+        go st' (s :: acc) rest
+  in
+  go (Handoff.init ~sent_so_far:sent) [] pieces
+
+let test_handoff_utf8_mid_char_divergence = fun _ctx ->
+  (* 世 = E4 B8 96 and 丢 = E4 B8 A2 share two bytes: a byte-level matcher
+     would forward a stray A2 continuation byte *)
+  let (pieces, st) = handoff_feed_all ~sent:"你好世界" [ "你好丢失的部分" ] in
+  let out = String.concat "" pieces in
+  Test.assert_equal ~expected:"丢失的部分" ~actual:out;
+  Test.assert_equal ~expected:true ~actual:(Handoff.is_valid_utf8 out);
+  Test.assert_equal ~expected:6 ~actual:(Handoff.matched_bytes st);
+  Test.assert_equal ~expected:(Some 6) ~actual:(Handoff.diverged_at st);
+  Test.assert_equal ~expected:(Some Handoff.Approximate) ~actual:(Handoff.level st);
+  Ok ()
+
+let test_handoff_utf8_split_across_feeds = fun _ctx ->
+  let (pieces, _) = handoff_feed_all ~sent:"ab" [ "a"; "b\xE4"; "\xB8"; "\xA2c" ] in
+  List.for_each pieces ~fn:(fun p -> Test.assert_equal ~expected:true ~actual:(Handoff.is_valid_utf8 p));
+  Test.assert_equal ~expected:"丢c" ~actual:(String.concat "" pieces);
+  Ok ()
+
+let test_handoff_classify_levels = fun _ctx ->
+  let level_of ~sent cont =
+    let (_, st) = handoff_feed_all ~sent [ cont ] in
+    Handoff.level st
+  in
+  (* full replay then new text *)
+  Test.assert_equal ~expected:(Some Handoff.Exact) ~actual:(level_of ~sent:"abc" "abc def");
+  (* direct continuation without replay *)
+  Test.assert_equal ~expected:(Some Handoff.Exact) ~actual:(level_of ~sent:"The answer is" " forty-two.");
+  (* drift late in the replay *)
+  Test.assert_equal ~expected:(Some Handoff.Approximate) ~actual:(level_of ~sent:"Hello world, this is" "Hello there");
+  (* drift early in the replay: a new answer *)
+  Test.assert_equal ~expected:(Some Handoff.Restart) ~actual:(level_of ~sent:"Sure, here is the answer" "Sure! Here it is");
+  (* diverges at byte 0 but opens like the original: a new answer *)
+  Test.assert_equal ~expected:(Some Handoff.Restart) ~actual:(level_of ~sent:"Hello world" "hello world again");
+  Test.assert_equal ~expected:"G3" ~actual:(Handoff.level_to_string Handoff.Restart);
+  Ok ()
+
+let test_handoff_restart_forwards_whole_answer = fun _ctx ->
+  match Handoff.step (Handoff.init ~sent_so_far:"Sure, here is the answer") "Sure! Here it is" with
+  | (Handoff.Restart_with s, _) ->
+      Test.assert_equal ~expected:"Sure! Here it is" ~actual:s;
+      Ok ()
+  | (Handoff.Forward s, _) -> Error ("expected restart, got forward: " ^ s)
+
+let test_handoff_undecided_head_waits = fun _ctx ->
+  (* divergence at byte 0 holds output until the head window can be judged *)
+  let st0 = Handoff.init ~sent_so_far:"Hello world" in
+  let (s1, st1) = Handoff.step st0 "hel" in
+  Test.assert_equal ~expected:true ~actual:(match s1 with Handoff.Forward "" -> true | _ -> false);
+  Test.assert_equal ~expected:None ~actual:(Handoff.level st1);
+  let (s2, st2) = Handoff.finish st1 in
+  Test.assert_equal ~expected:true ~actual:(match s2 with Handoff.Restart_with "hel" -> true | _ -> false);
+  Test.assert_equal ~expected:(Some Handoff.Restart) ~actual:(Handoff.level st2);
+  Ok ()
+
+let rand = fun bound -> match Random.int bound with Ok v -> v | Error _ -> 0
+
+let test_handoff_random_utf8_property = fun _ctx ->
+  let alphabet = [| "a"; "b"; " "; "é"; "你"; "丢"; "世"; "界"; "😀" |] in
+  let rand_text n =
+    String.concat "" (List.init ~count:n ~fn:(fun _ -> Array.get_unchecked alphabet ~at:(rand (Array.length alphabet))))
+  in
+  let rec split_random s acc =
+    let len = String.length s in
+    if len = 0 then List.rev acc
+    else
+      let k = 1 + rand len in
+      split_random (String.sub s ~offset:k ~len:(len - k)) (String.sub s ~offset:0 ~len:k :: acc)
+  in
+  let rec round i =
+    if i >= 100 then
+      Ok ()
+    else
+      let sent_chars = 1 + rand 20 in
+      let sent = rand_text sent_chars in
+      let keep = rand (String.length sent + 1) in
+      (* cut the replayed prefix back to a character boundary *)
+      let rec boundary k =
+        if k = 0 || k >= String.length sent then k
+        else if Char.code (String.get_unchecked sent ~at:k) land 0xC0 = 0x80 then boundary (k - 1)
+        else k
+      in
+      let keep = boundary keep in
+      let cont = String.sub sent ~offset:0 ~len:keep ^ rand_text (rand 12) in
+      let frags = split_random cont [] in
+      match (try Ok (handoff_feed_all ~sent frags) with Failure m -> Error m) with
+      | Error m ->
+          Error (m ^ " sent=" ^ String.escaped sent ^ " frags=" ^ String.concat "|" (List.map frags ~fn:String.escaped))
+      | Ok (pieces, _) ->
+      if List.all pieces ~fn:Handoff.is_valid_utf8 && Handoff.is_valid_utf8 (String.concat "" pieces) then
+        round (i + 1)
+      else
+        Error ("invalid utf-8 forwarded: sent=" ^ sent ^ " cont=" ^ cont)
+  in
+  round 0
+
 (* ---------- integration: mock + client ---------- *)
 
 let test_mid_stream_quota_death_then_seamless_continuation = fun _ctx ->
@@ -390,14 +499,23 @@ let mk_config = fun ~accounts ~kb ~routes ~max_fallback ->
     Config.server_host = "127.0.0.1";
     server_port = 0;
     data_dir = "./.oasis-test-data";
+    auth_token_env = None;
     accounts;
     agents = [];
     kb;
     policy =
-      { Config.goal = "balanced"; routes; agent_categories = [ "coding" ]; max_fallback };
+      {
+        Config.goal = "balanced";
+        routes;
+        agent_categories = [ "coding" ];
+        max_fallback;
+        max_handoffs = 2;
+        handoff_notice = true;
+        session_ttl_s = 600;
+      };
   }
 
-let mk_account = fun ?(enabled = true) ?(budget = 0) ?(daily = 0) ?(models = [ "m-a" ]) name ->
+let mk_account = fun ?(enabled = true) ?(budget = 0) ?(daily = 0) ?(models = [ "m-a" ]) ?(prefill = true) name ->
   {
     Config.name;
     provider = "test";
@@ -411,6 +529,10 @@ let mk_account = fun ?(enabled = true) ?(budget = 0) ?(daily = 0) ?(models = [ "
     tpm = 0;
     daily_limit = daily;
     monthly_budget_nano = budget;
+    supports_prefill = prefill;
+    quota_error_codes = [];
+    quota_reset = "daily";
+    stream_usage = false;
   }
 
 let zero_lookups =
@@ -704,6 +826,7 @@ let mk_snap = fun ?(ema = 200) ?(inflight = 0) ?(breaker_open = false) ?(rpm_use
     in_flight = inflight;
     breaker_open;
     requests_in_window = rpm_used;
+    parked = false;
   }
 
 let mk_scored_lookups = fun ~spent ~day ~snap ->
@@ -1428,6 +1551,8 @@ let mk_agent = fun ?(tier = 4) ?(command = "/bin/sh") ?(args = [ "{prompt}" ]) ?
     latency = "slow";
     enabled = true;
     concurrency_limit = concurrency;
+    allowed_workdirs = [];
+    env_passthrough = [];
   }
 
 let fix = fun name -> "./packages/portal/tests/fixtures/" ^ name
@@ -1462,11 +1587,20 @@ let mk_config_agents = fun ~accounts ~kb ~routes ~max_fallback ~agents ->
     Config.server_host = "127.0.0.1";
     server_port = 0;
     data_dir = "./.oasis-test-data";
+    auth_token_env = None;
     accounts;
     agents;
     kb;
     policy =
-      { Config.goal = "balanced"; routes; agent_categories = [ "coding" ]; max_fallback };
+      {
+        Config.goal = "balanced";
+        routes;
+        agent_categories = [ "coding" ];
+        max_fallback;
+        max_handoffs = 2;
+        handoff_notice = true;
+        session_ttl_s = 600;
+      };
   }
 
 let test_gateway_agent_non_stream_and_fallback = fun _ctx ->
@@ -1893,6 +2027,278 @@ enabled = true
         | _ -> Error "agents missing"
       )
 
+(* ---------- spec 0.3 §3.6: handoff acceptance H1–H8 ---------- *)
+
+let start_mocks = fun n ->
+  let rec go k acc =
+    if k = 0 then Ok (List.rev acc)
+    else
+      match Mock.start () with
+      | Error e -> Error ("mock start: " ^ e)
+      | Ok m -> go (k - 1) (m :: acc)
+  in
+  go n []
+
+let acc_name = fun i -> "acc_" ^ Int.to_string i
+
+let handoff_config = fun ?(prefill = fun _ -> true) ?(max_handoffs = 2) mocks ->
+  let accounts =
+    List.enumerate mocks
+    |> List.map ~fn:(fun (i, (m : Mock.t)) ->
+      {
+        (mk_account ~models:[ "m-x" ] ~prefill:(prefill i) (acc_name i)) with
+        Config.base_url = "http://127.0.0.1:" ^ Int.to_string m.pool.port;
+      })
+  in
+  let base =
+    mk_config
+      ~accounts
+      ~kb:[ mk_kb_model "m-x" ]
+      ~routes:[ { Config.category = "general"; accounts = List.map accounts ~fn:(fun a -> a.Config.name) } ]
+      ~max_fallback:(List.length mocks)
+  in
+  { base with Config.policy = { base.Config.policy with Config.max_handoffs } }
+
+(** A stream that delivers [first] and then dies inside the next frame. *)
+let dying_after = fun first rest ->
+  {
+    (Mock.default_scenario) with
+    sse = first :: rest;
+    cut_after_bytes =
+      String.length (Mock.stream_header 200)
+      + String.length (Mock.chunked_frame ("data: " ^ first ^ "\n\n"))
+      + 3;
+  }
+
+let h_stream = fun ?(headers = []) ?(extra = []) ~port () ->
+  let body =
+    Json.to_string
+      (Json.obj
+        ([
+           ("model", Json.string "m-x");
+           ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "q") ] ]);
+           ("max_tokens", Json.int 64);
+           ("stream", Json.bool true);
+         ]
+        @ extra))
+  in
+  match
+    gw_stream_collect
+      ~port
+      ~path:"/v1/chat/completions"
+      ~headers:(("X-Oasis-Category", "general") :: ("Content-Type", "application/json") :: headers)
+      ~body
+  with
+  | Error e -> Error e
+  | Ok (status, events, _) ->
+      let deltas = List.filter_map events ~fn:extract_choice_text in
+      Ok (status, events, deltas)
+
+let latest_handoffs = fun ~port ->
+  match gw_get ~port ~path:"/api/decisions" with
+  | Error e -> Error e
+  | Ok (_, body) -> (
+      match
+        Json.from_string body |> Result.to_option
+        |> Option.and_then ~fn:(fun j -> Json.get_field "decisions" j)
+        |> Option.and_then ~fn:Json.get_array
+        |> Option.and_then ~fn:List.head
+      with
+      | None -> Error ("no decisions: " ^ body)
+      | Some d ->
+          Ok
+            (Json.get_field "handoffs" d |> Option.and_then ~fn:Json.get_array
+            |> Option.unwrap_or ~default:[])
+    )
+
+let h_field_str = fun h k -> Json.get_field k h |> Option.and_then ~fn:Json.get_string |> Option.unwrap_or ~default:""
+let h_field_int = fun h k -> Json.get_field k h |> Option.and_then ~fn:Json.get_int |> Option.unwrap_or ~default:(-1)
+
+let notice_for = fun i -> "\n\n[Oasis: 上游中断，已切换到 " ^ acc_name i ^ " 重新生成]\n\n"
+
+(** Runs one handoff scenario: [setup] programs the mocks, [check] inspects
+    the client deltas, the latest decision's handoffs and the mocks. *)
+let handoff_case = fun ?prefill ?max_handoffs ?(extra = []) ?(headers = []) ~n ~setup ~check () ->
+  match start_mocks n with
+  | Error e -> Error e
+  | Ok mocks -> (
+      setup mocks;
+      match Gateway.start ~config_path:None ~config:(handoff_config ?prefill ?max_handoffs mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let res = h_stream ~headers ~extra ~port:gw.port () in
+          match res with
+          | Error e -> Error e
+          | Ok (status, events, deltas) -> (
+              if status != 200 then Error ("status " ^ Int.to_string status)
+              else
+                match latest_handoffs ~port:gw.port with
+                | Error e -> Error e
+                | Ok handoffs -> check ~gw ~mocks ~events ~deltas ~handoffs
+            )
+        )
+    )
+
+let nth_mock = fun mocks i -> List.get_unchecked mocks ~at:i
+
+let expect_level = fun handoffs lvl ->
+  match handoffs with
+  | [ h ] ->
+      if String.equal (h_field_str h "level") lvl then Ok h
+      else Error ("expected " ^ lvl ^ ", got " ^ Json.to_string h)
+  | _ -> Error ("expected one handoff, got " ^ Int.to_string (List.length handoffs))
+
+let test_h1_exact_replay = fun _ctx ->
+  handoff_case ~n:2
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after "ev1" [ "ev2" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ " ev2 ev3" ]; echo_prefix = Mock.Echo_exact })
+    ~check:(fun ~gw:_ ~mocks ~events:_ ~deltas ~handoffs ->
+      Test.assert_equal ~expected:"ev1 ev2 ev3" ~actual:(String.concat "" deltas);
+      let req_b = Mock.last_request (nth_mock mocks 1) in
+      Test.assert_equal ~expected:(Some "ev1") ~actual:(Mock.assistant_prefix req_b);
+      match expect_level handoffs "G1" with
+      | Error e -> Error e
+      | Ok h ->
+          Test.assert_equal ~expected:3 ~actual:(h_field_int h "matched_bytes");
+          Test.assert_equal ~expected:"acc_0" ~actual:(h_field_str h "from");
+          Test.assert_equal ~expected:"acc_1" ~actual:(h_field_str h "to");
+          Ok ())
+    ()
+
+let test_h2_direct_continuation = fun _ctx ->
+  handoff_case ~n:2
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after "ev1" [ "ev2" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ " ev2 ev3" ] })
+    ~check:(fun ~gw:_ ~mocks:_ ~events:_ ~deltas ~handoffs ->
+      Test.assert_equal ~expected:"ev1 ev2 ev3" ~actual:(String.concat "" deltas);
+      match expect_level handoffs "G1" with
+      | Error e -> Error e
+      | Ok h ->
+          Test.assert_equal ~expected:0 ~actual:(h_field_int h "matched_bytes");
+          Ok ())
+    ()
+
+let test_h3_multibyte_divergence = fun _ctx ->
+  handoff_case ~n:2
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after "你好世界" [ "后面的内容" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ "你好丢失的部分" ] })
+    ~check:(fun ~gw:_ ~mocks:_ ~events:_ ~deltas ~handoffs ->
+      List.for_each deltas ~fn:(fun d ->
+        Test.assert_equal ~expected:true ~actual:(Handoff.is_valid_utf8 d);
+        Test.assert_equal ~expected:false ~actual:(String.contains d "\xEF\xBF\xBD"));
+      Test.assert_equal ~expected:"你好世界丢失的部分" ~actual:(String.concat "" deltas);
+      match expect_level handoffs "G2" with
+      | Error e -> Error e
+      | Ok h ->
+          Test.assert_equal ~expected:6 ~actual:(h_field_int h "matched_bytes");
+          Ok ())
+    ()
+
+let test_h4_mutated_replay = fun _ctx ->
+  let sent = "The quick brown fox" in
+  handoff_case ~n:2
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after sent [ " jumps" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ " jumps" ]; echo_prefix = Mock.Echo_mutated })
+    ~check:(fun ~gw:_ ~mocks:_ ~events:_ ~deltas ~handoffs ->
+      let mutated = Mock.mutate_at_60pct sent in
+      let k = String.length sent * 3 / 5 in
+      Test.assert_equal
+        ~expected:(sent ^ String.sub mutated ~offset:k ~len:(String.length mutated - k) ^ " jumps")
+        ~actual:(String.concat "" deltas);
+      match expect_level handoffs "G2" with
+      | Error e -> Error e
+      | Ok h ->
+          Test.assert_equal ~expected:k ~actual:(h_field_int h "matched_bytes");
+          Ok ())
+    ()
+
+let test_h5_restart_with_notice = fun _ctx ->
+  let sent = "The quick brown fox" in
+  handoff_case ~n:2
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after sent [ " jumps" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ "Tx completely new answer" ] })
+    ~check:(fun ~gw:_ ~mocks:_ ~events:_ ~deltas ~handoffs ->
+      Test.assert_equal
+        ~expected:(sent ^ notice_for 1 ^ "Tx completely new answer")
+        ~actual:(String.concat "" deltas);
+      match expect_level handoffs "G3" with
+      | Error e -> Error e
+      | Ok _ -> Ok ())
+    ()
+
+let test_h5b_non_prefill_account_restarts = fun _ctx ->
+  handoff_case ~n:2
+    ~prefill:(fun i -> i = 0)
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after "partial" [ " more" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ "fresh answer" ] })
+    ~check:(fun ~gw:_ ~mocks ~events:_ ~deltas ~handoffs ->
+      Test.assert_equal ~expected:("partial" ^ notice_for 1 ^ "fresh answer") ~actual:(String.concat "" deltas);
+      Test.assert_equal ~expected:None ~actual:(Mock.assistant_prefix (Mock.last_request (nth_mock mocks 1)));
+      match expect_level handoffs "G3" with
+      | Error e -> Error e
+      | Ok _ -> Ok ())
+    ()
+
+let test_h6_handoff_limit = fun _ctx ->
+  handoff_case ~n:3
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after "alpha" [ "x" ]);
+      Mock.set_scenario (nth_mock mocks 1) (dying_after " beta" [ "x" ]);
+      Mock.set_scenario (nth_mock mocks 2) (dying_after " gamma" [ "x" ]))
+    ~check:(fun ~gw:_ ~mocks:_ ~events ~deltas ~handoffs ->
+      if not (String.equal "alpha beta gamma" (String.concat "" deltas)) then
+        Error ("deltas=" ^ String.concat "|" deltas ^ " handoffs=" ^ String.concat ";" (List.map handoffs ~fn:Json.to_string))
+      else (
+      Test.assert_equal ~expected:true ~actual:(List.any events ~fn:(fun ev -> String.contains ev.Sse.data "oasis_upstream_failed"));
+      Test.assert_equal ~expected:true ~actual:(List.any events ~fn:(fun ev -> ev.Sse.done_sentinel));
+      Test.assert_equal ~expected:2 ~actual:(List.length handoffs);
+      Test.assert_equal ~expected:[ "G1"; "G1" ] ~actual:(List.map handoffs ~fn:(fun h -> h_field_str h "level"));
+      Ok ()))
+    ()
+
+let test_h7_tools_request_restarts = fun _ctx ->
+  handoff_case ~n:2
+    ~extra:[ ("tools", Json.array [ Json.obj [ ("type", Json.string "function") ] ]) ]
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after "alpha" [ "x" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ "alpha beta" ]; echo_prefix = Mock.Echo_exact })
+    ~check:(fun ~gw:_ ~mocks ~events:_ ~deltas ~handoffs ->
+      Test.assert_equal ~expected:None ~actual:(Mock.assistant_prefix (Mock.last_request (nth_mock mocks 1)));
+      Test.assert_equal ~expected:("alpha" ^ notice_for 1 ^ "alpha beta") ~actual:(String.concat "" deltas);
+      match expect_level handoffs "G3" with
+      | Error e -> Error e
+      | Ok _ -> Ok ())
+    ()
+
+let test_h8_session_pin_migrates = fun _ctx ->
+  handoff_case ~n:2
+    ~headers:[ ("X-Oasis-Session", "h8") ]
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) (dying_after "ev1" [ "ev2" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ " ev2" ] })
+    ~check:(fun ~gw ~mocks ~events:_ ~deltas ~handoffs:_ ->
+      Test.assert_equal ~expected:"ev1 ev2" ~actual:(String.concat "" deltas);
+      Mock.set_scenario (nth_mock mocks 0) { (Mock.default_scenario) with body = openai_ok_body ~content:"from-a" };
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with body = openai_ok_body ~content:"from-b" };
+      match
+        gw_post
+          ~port:gw.port
+          ~path:"/v1/chat/completions"
+          ~headers:[ ("X-Oasis-Category", "general"); ("X-Oasis-Session", "h8"); ("Content-Type", "application/json") ]
+          ~body:"{\"model\":\"m-x\",\"messages\":[{\"role\":\"user\",\"content\":\"next\"}]}"
+      with
+      | Error e -> Error e
+      | Ok (_, body) ->
+          Test.assert_equal ~expected:true ~actual:(String.contains body "from-b");
+          Ok ())
+    ()
+
 let tests =
   Test.[
     case "chunked decoding: single chunk" test_chunked_single_chunk;
@@ -1908,6 +2314,12 @@ let tests =
     case "handoff: partial-prefix divergence" test_handoff_partial_prefix_divergence;
     case "handoff: exact match forwards nothing" test_handoff_exact_match_forwards_nothing;
     case "handoff: fragmented feeds equal single feed" test_handoff_incremental_property;
+    case "handoff: utf-8 divergence inside a shared lead byte" test_handoff_utf8_mid_char_divergence;
+    case "handoff: utf-8 sequence split across feeds" test_handoff_utf8_split_across_feeds;
+    case "handoff: G1/G2/G3 classification" test_handoff_classify_levels;
+    case "handoff: restart forwards the whole new answer" test_handoff_restart_forwards_whole_answer;
+    case "handoff: undecided head waits for the window" test_handoff_undecided_head_waits;
+    case "handoff: random utf-8 property (100 rounds)" test_handoff_random_utf8_property;
             case "integration: mid-stream quota death + seamless continuation" test_mid_stream_quota_death_then_seamless_continuation;
     case "kb: fit scoring" test_kb_fit_scoring;
     case "kb: cost estimate and context checks" test_kb_cost_and_context;
@@ -1945,6 +2357,15 @@ let tests =
     case "signals: release_in_flight without breaker impact" test_signals_release_in_flight;
     case "router v2: cheapest vs fastest goal" test_router_v2_cheapest_goal;
     case "router v2: breaker open rejects account" test_router_v2_breaker_blocks;
+    case ~size:Test.Large "H1: exact replay is deduplicated (G1)" test_h1_exact_replay;
+    case ~size:Test.Large "H2: direct continuation (G1)" test_h2_direct_continuation;
+    case ~size:Test.Large "H3: divergence inside a multi-byte char stays valid UTF-8 (G2)" test_h3_multibyte_divergence;
+    case ~size:Test.Large "H4: drifting replay forwarded from divergence (G2)" test_h4_mutated_replay;
+    case ~size:Test.Large "H5: early divergence restarts with a notice (G3)" test_h5_restart_with_notice;
+    case ~size:Test.Large "H5b: non-prefill fallback restarts with a notice (G3)" test_h5b_non_prefill_account_restarts;
+    case ~size:Test.Large "H6: handoff limit ends with an SSE error (G0)" test_h6_handoff_limit;
+    case ~size:Test.Large "H7: tools requests never splice a prefix (G3)" test_h7_tools_request_restarts;
+    case ~size:Test.Large "H8: session pin migrates to the fallback" test_h8_session_pin_migrates;
           ]
 
 let main ~args =

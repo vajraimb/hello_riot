@@ -16,6 +16,10 @@ type account = {
   tpm: int;
   daily_limit: int;
   monthly_budget_nano: int;
+  supports_prefill: bool;
+  quota_error_codes: string list;
+  quota_reset: string;
+  stream_usage: bool;
 }
 
 type route = {
@@ -28,12 +32,16 @@ type policy = {
   routes: route list;
   agent_categories: string list;
   max_fallback: int;
+  max_handoffs: int;
+  handoff_notice: bool;
+  session_ttl_s: int;
 }
 
 type t = {
   server_host: string;
   server_port: int;
   data_dir: string;
+  auth_token_env: string option;
   accounts: account list;
   agents: Portal_agent.agent list;
   kb: Portal_kb.model_kb list;
@@ -50,6 +58,21 @@ let api_key_of = fun (account : account) ->
   match account.api_key_env with
   | None -> None
   | Some var -> Env.var Env.String ~name:var
+
+let auth_token = fun (cfg : t) ->
+  match cfg.auth_token_env with
+  | None -> None
+  | Some var -> (
+      match Env.var Env.String ~name:var with
+      | Some v when not (String.is_empty (String.trim v)) -> Some (String.trim v)
+      | _ -> None
+    )
+
+let is_loopback_host = fun host ->
+  String.equal host "localhost"
+  || String.starts_with ~prefix:"127." host
+  || String.equal host "::1"
+  || String.starts_with ~prefix:"::ffff:127." host
 
 (* ---------- TOML parsing ---------- *)
 
@@ -97,15 +120,17 @@ let parse_account = fun fields ->
         field fields "enabled" |> Option.and_then ~fn:get_bool_like
         |> Option.unwrap_or ~default:true
       in
+      let protocol =
+        field fields "protocol" |> Option.and_then ~fn:Toml.get_string
+        |> Option.unwrap_or ~default:"openai"
+      in
       Ok
         {
           name;
           provider =
             field fields "provider" |> Option.and_then ~fn:Toml.get_string
             |> Option.unwrap_or ~default:"openai";
-          protocol =
-            field fields "protocol" |> Option.and_then ~fn:Toml.get_string
-            |> Option.unwrap_or ~default:"openai";
+          protocol;
           thinking =
             field fields "thinking" |> Option.and_then ~fn:Toml.get_string
             |> Option.unwrap_or ~default:"disabled";
@@ -121,6 +146,18 @@ let parse_account = fun fields ->
           monthly_budget_nano =
             field fields "monthly_budget_nano" |> Option.and_then ~fn:Toml.get_int
             |> Option.unwrap_or ~default:0;
+          supports_prefill =
+            field fields "supports_prefill" |> Option.and_then ~fn:get_bool_like
+            |> Option.unwrap_or ~default:(String.equal protocol "anthropic");
+          quota_error_codes =
+            field fields "quota_error_codes" |> Option.and_then ~fn:str_list
+            |> Option.unwrap_or ~default:[];
+          quota_reset =
+            field fields "quota_reset" |> Option.and_then ~fn:Toml.get_string
+            |> Option.unwrap_or ~default:"daily";
+          stream_usage =
+            field fields "stream_usage" |> Option.and_then ~fn:get_bool_like
+            |> Option.unwrap_or ~default:true;
         }
 
 let parse_kb_model = fun fields ->
@@ -206,6 +243,12 @@ let parse_agent = fun fields ->
           concurrency_limit =
             field fields "concurrency_limit" |> Option.and_then ~fn:Toml.get_int
             |> Option.unwrap_or ~default:2;
+          allowed_workdirs =
+            field fields "allowed_workdirs" |> Option.and_then ~fn:str_list
+            |> Option.unwrap_or ~default:[];
+          env_passthrough =
+            field fields "env_passthrough" |> Option.and_then ~fn:str_list
+            |> Option.unwrap_or ~default:[];
         }
 
 let parse_route = fun fields ->
@@ -244,6 +287,9 @@ let load = fun path ->
               let data_dir =
                 field server_fields "data_dir" |> Option.and_then ~fn:Toml.get_string
                 |> Option.unwrap_or ~default:"./.oasis-data"
+              in
+              let auth_token_env =
+                field server_fields "auth_token_env" |> Option.and_then ~fn:Toml.get_string
               in
               let account_parses =
                 field fields "accounts" |> Option.and_then ~fn:Toml.get_array
@@ -322,11 +368,20 @@ let load = fun path ->
                   max_fallback =
                     field policy_fields "max_fallback" |> Option.and_then ~fn:Toml.get_int
                     |> Option.unwrap_or ~default:2;
+                  max_handoffs =
+                    field policy_fields "max_handoffs" |> Option.and_then ~fn:Toml.get_int
+                    |> Option.unwrap_or ~default:2;
+                  handoff_notice =
+                    field policy_fields "handoff_notice" |> Option.and_then ~fn:get_bool_like
+                    |> Option.unwrap_or ~default:true;
+                  session_ttl_s =
+                    field policy_fields "session_ttl_s" |> Option.and_then ~fn:Toml.get_int
+                    |> Option.unwrap_or ~default:600;
                 }
               in
               let errors = account_errors @ kb_errors @ route_errors @ agent_errors in
               if List.is_empty errors then
-                Ok { server_host; server_port; data_dir; accounts; agents; kb; policy }
+                Ok { server_host; server_port; data_dir; auth_token_env; accounts; agents; kb; policy }
               else
                 Error ("config errors: " ^ String.concat "; " errors)
         )

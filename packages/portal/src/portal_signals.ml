@@ -24,7 +24,14 @@ type signals = {
   in_flight: int;
   breaker: breaker_state;
   last_error: string option;
+  parked_until_ms: int;
+  auth_invalid: bool;
 }
+
+type error_class =
+  | Transient
+  | Quota
+  | Client of { auth: bool }
 
 let fresh = fun () ->
   {
@@ -38,10 +45,80 @@ let fresh = fun () ->
     in_flight = 0;
     breaker = Closed;
     last_error = None;
+    parked_until_ms = 0;
+    auth_invalid = false;
   }
 
+(** Wall-clock milliseconds since the Unix epoch. Breaker deadlines, rate
+    windows and quota parking all compare against this, and parking is
+    persisted across restarts, so it must not be a per-process counter. *)
 let now_ms = fun () ->
-  Time.Duration.to_millis (Time.Instant.elapsed (Time.Instant.now ()))
+  Time.Duration.to_millis (Time.SystemTime.duration_since_epoch ())
+
+(* ---------- failure classification (spec §2.4.1) ---------- *)
+
+let default_quota_markers =
+  [ "1113"; "insufficient_quota"; "insufficient_balance"; "balance"; "credit"; "quota"; "余额" ]
+
+let contains_ci = fun haystack needle ->
+  String.contains (String.lowercase_ascii haystack) (String.lowercase_ascii needle)
+
+(** [classify_error ~status ~body ~quota_codes] decides how a failed upstream
+    call affects the account: [Quota] parks it until its quota resets,
+    [Client] errors never trip the breaker, everything else is [Transient]. *)
+let classify_error = fun ~(status : int option) ~(body : string) ~(quota_codes : string list) ->
+  let quota_marked () =
+    List.any (default_quota_markers @ quota_codes) ~fn:(fun m -> contains_ci body m)
+  in
+  match status with
+  | Some 402 -> Quota
+  | Some 429 -> if quota_marked () then Quota else Transient
+  | Some (401 | 403) -> Client { auth = true }
+  | Some (400 | 404 | 413 | 422) -> Client { auth = false }
+  | _ -> Transient
+
+let error_class_to_string = function
+  | Transient -> "transient"
+  | Quota -> "quota"
+  | Client { auth = true } -> "client_auth"
+  | Client { auth = false } -> "client"
+
+(** Civil date from days since 1970-01-01 (Howard Hinnant's algorithm). *)
+let civil_of_days = fun days ->
+  let z = days + 719468 in
+  let era = (if z >= 0 then z else z - 146096) / 146097 in
+  let doe = z - (era * 146097) in
+  let yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365 in
+  let y = yoe + (era * 400) in
+  let doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100)) in
+  let mp = ((5 * doy) + 2) / 153 in
+  let d = doy - (((153 * mp) + 2) / 5) + 1 in
+  let m = if mp < 10 then mp + 3 else mp - 9 in
+  ((if m <= 2 then y + 1 else y), m, d)
+
+let days_of_civil = fun ~y ~m ~d ->
+  let y = if m <= 2 then y - 1 else y in
+  let era = (if y >= 0 then y else y - 399) / 400 in
+  let yoe = y - (era * 400) in
+  let mp = if m > 2 then m - 3 else m + 9 in
+  let doy = (((153 * mp) + 2) / 5) + d - 1 in
+  let doe = (yoe * 365) + (yoe / 4) - (yoe / 100) + doy in
+  (era * 146097) + doe - 719468
+
+let day_ms = 86_400_000
+
+(** When a parked account's quota resets: the next UTC midnight, or the
+    first day of next month (UTC) for [quota_reset = "monthly"]. *)
+let quota_reset_at = fun ~now_ms ~reset ->
+  let today = now_ms / day_ms in
+  if String.equal reset "monthly" then
+    let (y, m, _) = civil_of_days today in
+    let (y', m') = if m = 12 then (y + 1, 1) else (y, m + 1) in
+    days_of_civil ~y:y' ~m:m' ~d:1 * day_ms
+  else
+    (today + 1) * day_ms
+
+let is_parked = fun (s : signals) now_ms -> s.parked_until_ms > now_ms
 
 (* ---------- pure transitions (unit-testable) ---------- *)
 
@@ -106,6 +183,7 @@ let record_success = fun (s : signals) ~latency_ms ~tokens now_ms ->
     consecutive_failures = 0;
     in_flight = max 0 (s.in_flight - 1);
     last_error = None;
+    auth_invalid = false;
   }
 
 let record_failure = fun (s : signals) ~error now_ms ->
@@ -131,6 +209,26 @@ let record_failure = fun (s : signals) ~error now_ms ->
     in_flight = max 0 (s.in_flight - 1);
     breaker =
       (if tripped then Open_until (now_ms + 30000) else s.breaker);
+    last_error = Some error;
+  }
+
+(** Quota/balance exhaustion: park until [until_ms]. Not a latency sample and
+    not a breaker event — probing every 30s would only burn requests. *)
+let record_quota = fun (s : signals) ~error ~until_ms ->
+  {
+    s with
+    in_flight = max 0 (s.in_flight - 1);
+    parked_until_ms = max s.parked_until_ms until_ms;
+    last_error = Some error;
+  }
+
+(** The request itself was rejected (4xx): no breaker impact; 401/403 flag
+    the account's key as invalid. *)
+let record_client_error = fun (s : signals) ~error ~auth ->
+  {
+    s with
+    in_flight = max 0 (s.in_flight - 1);
+    auth_invalid = s.auth_invalid || auth;
     last_error = Some error;
   }
 
@@ -169,3 +267,41 @@ let update = fun (t : t) account ~fn ->
   s'
 
 let snapshot = fun (t : t) account -> get t account
+
+(* ---------- parked-account persistence ---------- *)
+
+module Json = Std.Data.Json
+
+(** Parking must survive restarts, otherwise an account that ran out of money
+    rejoins the pool on every boot. *)
+let save_parked = fun (t : t) ~path ->
+  let now = now_ms () in
+  let entries = ref [] in
+  ConcurrentHashMap.for_each t ~fn:(fun account s ->
+    if s.parked_until_ms > now then
+      entries := (account, Json.int s.parked_until_ms) :: !entries);
+  match Path.from_string path with
+  | Error _ -> ()
+  | Ok p ->
+      let _ = Fs.write (Json.to_string (Json.obj !entries)) p in
+      ()
+
+let load_parked = fun (t : t) ~path ->
+  let now = now_ms () in
+  match Path.from_string path with
+  | Error _ -> ()
+  | Ok p -> (
+      match Fs.read_to_string p with
+      | Error _ -> ()
+      | Ok content -> (
+          match Json.from_string content |> Result.to_option |> Option.and_then ~fn:Json.get_object with
+          | None -> ()
+          | Some fields ->
+              List.for_each fields ~fn:(fun (account, v) ->
+                match Json.get_int v with
+                | Some until when until > now ->
+                    let _ = update t account ~fn:(fun s -> { s with parked_until_ms = until }) in
+                    ()
+                | _ -> ())
+        )
+    )

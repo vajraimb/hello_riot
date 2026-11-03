@@ -28,6 +28,20 @@ type attempt = {
   cost_nano: int;
 }
 
+(** One mid-stream account switch (spec §3.4). [level] is G1/G2/G3, or
+    G0 when the continuation leg itself failed before it was classified. *)
+type handoff = {
+  from_account: string;
+  to_account: string;
+  reason: string;
+  sent_bytes: int;
+  matched_bytes: int;
+  diverged: bool;
+  level: string;
+  model_changed: bool;
+  at_ms: int;
+}
+
 type decision = {
   task_category: string;
   chosen: string option;
@@ -35,7 +49,11 @@ type decision = {
   rejected: rejected list;
   attempts: attempt list;
   scores: (string * int) list;
+  unpriced: string list;
+  handoffs: handoff list;
 }
+
+let decision_schema = 2
 
 type goal =
   | Cheapest
@@ -54,6 +72,7 @@ type account_snapshot = {
   in_flight: int;
   breaker_open: bool;
   requests_in_window: int;
+  parked: bool;
 }
 
 type lookups = {
@@ -69,11 +88,28 @@ let empty_decision = fun category ->
     rejected = [];
     attempts = [];
     scores = [];
+    unpriced = [];
+    handoffs = [];
   }
+
+let handoff_json = fun (h : handoff) ->
+  Json.obj
+    [
+      ("from", Json.string h.from_account);
+      ("to", Json.string h.to_account);
+      ("reason", Json.string h.reason);
+      ("sent_bytes", Json.int h.sent_bytes);
+      ("matched_bytes", Json.int h.matched_bytes);
+      ("diverged", Json.bool h.diverged);
+      ("level", Json.string h.level);
+      ("model_changed", Json.bool h.model_changed);
+      ("at_ms", Json.int h.at_ms);
+    ]
 
 let decision_json = fun (d : decision) ->
   Json.obj
     [
+      ("schema", Json.int decision_schema);
       ("task_category", Json.string d.task_category);
       (
         "chosen",
@@ -131,8 +167,10 @@ let decision_json = fun (d : decision) ->
                 [
                   ("account", Json.string name);
                   ("score", Json.int score);
+                  ("price_known", Json.bool (not (List.any d.unpriced ~fn:(String.equal name))));
                 ]))
       );
+      ("handoffs", Json.array (List.map d.handoffs ~fn:handoff_json));
     ]
 
 let route = fun (config : Portal_config.t) (lookups : lookups) (task : task) ->
@@ -232,6 +270,8 @@ let route = fun (config : Portal_config.t) (lookups : lookups) (task : task) ->
     rejected = List.rev !rejects;
     attempts = [];
     scores = [];
+    unpriced = [];
+    handoffs = [];
   }
 
 (* ---------- v2: real-time scored routing ---------- *)
@@ -259,6 +299,22 @@ let latency_score = fun ~ema_ms ->
   (* ema 0 → 100; every 20ms of EMA costs 1 point, floor 0 *)
   max 0 (100 - (ema_ms / 20))
 
+(** Agents run for tens of seconds to minutes: every 2s of EMA costs 1 point,
+    so 30s and 120s agents still score differently. *)
+let latency_score_agent = fun ~ema_ms ->
+  max 0 (100 - (ema_ms / 2000))
+
+let price_known = fun (kbe : Portal_kb.model_kb) ->
+  kbe.Portal_kb.in_price_nano > 0 || kbe.Portal_kb.out_price_nano > 0
+
+let unknown_price_cost_score = 50
+
+(** Cost routing only means something once at least two KB models carry a
+    real price. *)
+let cost_routing_effective = fun (config : Portal_config.t) ->
+  List.fold_left config.Portal_config.kb ~init:0 ~fn:(fun n m -> if price_known m then n + 1 else n)
+  >= 2
+
 let load_score = fun ~in_flight ->
   max 0 (100 - (in_flight * 15))
 
@@ -277,8 +333,8 @@ let route_scored =
           ~fn:(fun a -> a.Portal_config.name)
   in
   let rejects = ref [] in
-  (* returns (name, model, price_nano, fit, lat_score, load_score) *)
-  let check (name : string) : (string * string * int * int * int * int) option =
+  (* returns (name, model, price_nano (None = unknown), fit, lat_score, load_score) *)
+  let check (name : string) : (string * string * int option * int * int * int) option =
     match Portal_config.find_account config name with
     | None ->
         rejects := { account = name; reason = "unknown_account" } :: !rejects;
@@ -315,14 +371,15 @@ let route_scored =
                 in
                 let price_nano =
                   match kb_entry with
-                  | None -> 0
-                  | Some kbe ->
-                      Portal_kb.est_cost_nano
-                        kbe
-                        ~cache_tokens:0
-                        ~in_tokens:task.est_in_tokens
-                        ~out_tokens:task.est_out_tokens
-                    in
+                  | Some kbe when price_known kbe ->
+                      Some
+                        (Portal_kb.est_cost_nano
+                          kbe
+                          ~cache_tokens:0
+                          ~in_tokens:task.est_in_tokens
+                          ~out_tokens:task.est_out_tokens)
+                  | _ -> None
+                in
                 let fit =
                   match kb_entry with
                   | None -> 50
@@ -333,7 +390,7 @@ let route_scored =
                   if acc.Portal_config.monthly_budget_nano <= 0 then
                     true
                   else
-                    spent + price_nano <= acc.Portal_config.monthly_budget_nano
+                    spent + Option.unwrap_or price_nano ~default:0 <= acc.Portal_config.monthly_budget_nano
                 in
                 let day_ok =
                   if acc.Portal_config.daily_limit <= 0 then
@@ -343,6 +400,7 @@ let route_scored =
                 in
                 let snap = lookups.snapshot name in
                 let breaker_ok = not snap.breaker_open in
+                let parked_ok = not snap.parked in
                 let rpm_ok =
                   if acc.Portal_config.rpm <= 0 then
                     true
@@ -353,6 +411,7 @@ let route_scored =
                   fits_context
                   && budget_ok
                   && day_ok
+                  && parked_ok
                   && breaker_ok
                   && rpm_ok
                 in
@@ -372,6 +431,8 @@ let route_scored =
                       "budget_exhausted"
                     else if not day_ok then
                       "daily_limit_reached"
+                    else if not parked_ok then
+                      "quota_parked"
                     else if not breaker_ok then
                       "circuit_open"
                     else
@@ -383,19 +444,18 @@ let route_scored =
           )
   in
   let passing = List.filter_map candidates ~fn:check in
+  let known_prices = List.filter_map passing ~fn:(fun (_, _, p, _, _, _) -> p) in
   let min_price =
-    List.fold_left
-      passing
-      ~init:0
-      ~fn:(fun acc (_, _, p, _, _, _) ->
-        if acc = 0 then p else min acc p)
+    match known_prices with
+    | [] -> 0
+    | p :: rest -> List.fold_left rest ~init:p ~fn:min
   in
-  let max_price =
-    List.fold_left passing ~init:0 ~fn:(fun acc (_, _, p, _, _, _) -> max acc p)
-  in
-  let cost_score p =
-    if max_price = min_price then 100
-    else 100 - (((p - min_price) * 100) / (max_price - min_price))
+  let max_price = List.fold_left known_prices ~init:min_price ~fn:max in
+  let cost_score = function
+    | None -> unknown_price_cost_score
+    | Some p ->
+        if max_price = min_price then 100
+        else 100 - (((p - min_price) * 100) / (max_price - min_price))
   in
   let weights = weights_of_goal goal in
   let indexed =
@@ -440,4 +500,8 @@ let route_scored =
     rejected = List.rev !rejects;
     attempts = [];
     scores = List.map sorted ~fn:(fun (_, name, _, s) -> (name, s));
+    unpriced =
+      List.filter_map passing ~fn:(fun (name, _, p, _, _, _) ->
+        match p with None -> Some name | Some _ -> None);
+    handoffs = [];
   }
