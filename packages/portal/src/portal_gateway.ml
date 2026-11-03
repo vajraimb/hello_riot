@@ -29,6 +29,8 @@ type state = {
   tasks: Portal_task.t;
   inbox: Portal_inbox.t;
   ws_clients: (int, Net.TcpStream.t) ConcurrentHashMap.t;
+  decision_history: Json.t list Sync.Atomic.t;
+  decisions_appended: int Sync.Atomic.t;
 }
 
 (* ---------- helpers ---------- *)
@@ -49,6 +51,63 @@ let parse_json_body = fun (ctx : Trail.ctx) ->
 
 let get_header = fun (ctx : Trail.ctx) name ->
   Net.Http.Request.get_header ctx.req name
+
+let constant_time_equal = fun a b ->
+  if String.length a != String.length b then false
+  else
+    let diff = ref 0 in
+    for i = 0 to String.length a - 1 do
+      diff := !diff lor (Char.code (String.get_unchecked a ~at:i) lxor Char.code (String.get_unchecked b ~at:i))
+    done;
+    !diff = 0
+
+let percent_decode = fun s ->
+  let n = String.length s in
+  let buf = StringBuilder.create ~size:n in
+  let hex c =
+    match c with
+    | '0' .. '9' -> Some (Char.code c - 48)
+    | 'a' .. 'f' -> Some (Char.code c - 87)
+    | 'A' .. 'F' -> Some (Char.code c - 55)
+    | _ -> None
+  in
+  let escaped i =
+    if i + 2 < n then
+      match (hex (String.get_unchecked s ~at:(i + 1)), hex (String.get_unchecked s ~at:(i + 2))) with
+      | (Some a, Some b) -> Some (Char.from_int_unchecked ((a * 16) + b))
+      | _ -> None
+    else None
+  in
+  let rec go i =
+    if i < n then
+      match String.get_unchecked s ~at:i with
+      | '%' -> (
+          match escaped i with
+          | Some c ->
+              StringBuilder.add_char buf c;
+              go (i + 3)
+          | None ->
+              StringBuilder.add_char buf '%';
+              go (i + 1)
+        )
+      | c ->
+          StringBuilder.add_char buf c;
+          go (i + 1)
+  in
+  go 0;
+  StringBuilder.contents buf
+
+let query_param = fun (ctx : Trail.ctx) name ->
+  match Net.Uri.query (Net.Http.Request.uri ctx.req) with
+  | None -> None
+  | Some q ->
+      String.split ~by:"&" q
+      |> List.filter_map ~fn:(fun kv ->
+        match String.split ~by:"=" kv with
+        | k :: rest when String.equal k name -> Some (percent_decode (String.concat "=" rest))
+        | _ -> None)
+      |> List.head
+
 
 let est_input_tokens = fun (body : Json.t) ->
   match Json.get_field "messages" body |> Option.and_then ~fn:Json.get_array with
@@ -303,6 +362,63 @@ let new_request_id = fun () ->
   in
   "req-" ^ Int.to_string (pick 1000000000)
 
+(* ---------- decisions.jsonl (spec §6) ---------- *)
+
+let decisions_keep = 1000
+
+let decisions_file = fun (state : state) -> data_path state "decisions.jsonl"
+
+let read_decision_lines = fun path ->
+  match Path.from_string path with
+  | Error _ -> []
+  | Ok p -> (
+      match Fs.read_to_string p with
+      | Error _ -> []
+      | Ok content ->
+          String.split ~by:"\n" content |> List.filter ~fn:(fun l -> not (String.is_empty l))
+    )
+
+let drop_to_last = fun lines ~keep -> List.rev lines |> List.take ~len:keep |> List.rev
+
+(** Rewrites the file with its newest [decisions_keep] lines and returns
+    them, oldest first. *)
+let compact_decisions = fun path ->
+  let lines = read_decision_lines path |> drop_to_last ~keep:decisions_keep in
+  (
+    match Path.from_string path with
+    | Error _ -> ()
+    | Ok p ->
+        let _ = Fs.write (String.concat "" (List.map lines ~fn:(fun l -> l ^ "\n"))) p in
+        ()
+  );
+  lines
+
+let append_decision = fun (state : state) (j : Json.t) ->
+  let path = decisions_file state in
+  (
+    match Path.from_string path with
+    | Error _ -> ()
+    | Ok p -> (
+        match Fs.File.open_append p with
+        | Ok file ->
+            let _ = Fs.File.write_all file (Json.to_string j ^ "\n") in
+            let _ = Fs.File.close file in
+            ()
+        | Error _ -> ()
+      )
+  );
+  let n = Sync.Atomic.get state.decisions_appended + 1 in
+  if n >= decisions_keep then (
+    let _ = compact_decisions path in
+    Sync.Atomic.set state.decisions_appended 0
+  ) else Sync.Atomic.set state.decisions_appended n
+
+(** Decisions recorded by earlier runs, newest first, loaded at start. *)
+let load_decision_history = fun (state : state) ->
+  let lines = compact_decisions (decisions_file state) in
+  let parsed = List.filter_map lines ~fn:(fun l -> Json.from_string l |> Result.to_option) in
+  Sync.Atomic.set state.decision_history (List.rev parsed)
+
 let record_decision = fun (state : state) (d : Portal_router.decision) ->
   let d =
     {
@@ -312,7 +428,11 @@ let record_decision = fun (state : state) (d : Portal_router.decision) ->
           { a with Portal_router.error = Option.map a.Portal_router.error ~fn:Portal_signals.redact_secrets });
     }
   in
-  let _ = Agent.get_and_update state.decisions ~fn:(fun ds -> ((), List.take (d :: ds) ~len:200)) in
+  let _ =
+    Agent.get_and_update state.decisions ~fn:(fun ds ->
+      append_decision state (Portal_router.decision_json d);
+      ((), List.take (d :: ds) ~len:200))
+  in
   broadcast_json
     state
     (Json.obj
@@ -324,6 +444,11 @@ let record_decision = fun (state : state) (d : Portal_router.decision) ->
 
 let recent_decisions = fun (state : state) ->
   Agent.get state.decisions ~fn:(fun ds -> ds)
+
+(** Live decisions followed by persisted history from earlier runs. *)
+let decisions_json = fun (state : state) ~limit ->
+  let live = recent_decisions state |> List.map ~fn:Portal_router.decision_json in
+  List.take (live @ Sync.Atomic.get state.decision_history) ~len:limit
 
 let snapshot_of = fun (state : state) account ->
   let s = Portal_signals.get state.signals account in
@@ -2207,11 +2332,17 @@ let handle_list_accounts = fun (state : state) (ctx : Trail.ctx) ->
       ])
 
 let handle_list_decisions = fun (state : state) (ctx : Trail.ctx) ->
-  let ds = recent_decisions state in
+  let limit =
+    query_param ctx "limit" |> Option.and_then ~fn:Int.from_string_opt
+    |> Option.unwrap_or ~default:200 |> max 1 |> min decisions_keep
+  in
   Trail.json
     ctx
     (Json.obj
-      [ ("decisions", Json.array (List.map ds ~fn:Portal_router.decision_json)) ])
+      [
+        ("schema", Json.int Portal_router.decision_schema);
+        ("decisions", Json.array (decisions_json state ~limit));
+      ])
 
 let handle_list_ledger = fun (state : state) (ctx : Trail.ctx) ->
   let entries = Portal_ledger.recent state.ledger ~len:100 in
@@ -2774,12 +2905,7 @@ let mcp_tool_status = fun (state : state) ->
   Ok (String.concat "\n" lines)
 let mcp_tool_decisions = fun (state : state) (params : Json.t) ->
   let limit = mcp_get_int params "limit" |> Option.unwrap_or ~default:10 in
-  let ds = recent_decisions state |> List.take ~len:limit in
-  Ok
-    (ds
-    |> List.map ~fn:(fun d ->
-      Portal_router.decision_json d |> Json.to_string)
-    |> String.concat "\n")
+  Ok (decisions_json state ~limit |> List.map ~fn:Json.to_string |> String.concat "\n")
 
 
 let handle_reload = fun (state : state) (ctx : Trail.ctx) ->
@@ -3402,62 +3528,6 @@ let handle_mcp = fun (state : state) (ctx : Trail.ctx) ->
 
 (* ---------- auth (spec §5.1) ---------- *)
 
-let constant_time_equal = fun a b ->
-  if String.length a != String.length b then false
-  else
-    let diff = ref 0 in
-    for i = 0 to String.length a - 1 do
-      diff := !diff lor (Char.code (String.get_unchecked a ~at:i) lxor Char.code (String.get_unchecked b ~at:i))
-    done;
-    !diff = 0
-
-let percent_decode = fun s ->
-  let n = String.length s in
-  let buf = StringBuilder.create ~size:n in
-  let hex c =
-    match c with
-    | '0' .. '9' -> Some (Char.code c - 48)
-    | 'a' .. 'f' -> Some (Char.code c - 87)
-    | 'A' .. 'F' -> Some (Char.code c - 55)
-    | _ -> None
-  in
-  let escaped i =
-    if i + 2 < n then
-      match (hex (String.get_unchecked s ~at:(i + 1)), hex (String.get_unchecked s ~at:(i + 2))) with
-      | (Some a, Some b) -> Some (Char.from_int_unchecked ((a * 16) + b))
-      | _ -> None
-    else None
-  in
-  let rec go i =
-    if i < n then
-      match String.get_unchecked s ~at:i with
-      | '%' -> (
-          match escaped i with
-          | Some c ->
-              StringBuilder.add_char buf c;
-              go (i + 3)
-          | None ->
-              StringBuilder.add_char buf '%';
-              go (i + 1)
-        )
-      | c ->
-          StringBuilder.add_char buf c;
-          go (i + 1)
-  in
-  go 0;
-  StringBuilder.contents buf
-
-let query_param = fun (ctx : Trail.ctx) name ->
-  match Net.Uri.query (Net.Http.Request.uri ctx.req) with
-  | None -> None
-  | Some q ->
-      String.split ~by:"&" q
-      |> List.filter_map ~fn:(fun kv ->
-        match String.split ~by:"=" kv with
-        | k :: rest when String.equal k name -> Some (percent_decode (String.concat "=" rest))
-        | _ -> None)
-      |> List.head
-
 let bearer_of = fun header ->
   let h = String.trim header in
   if String.starts_with ~prefix:"Bearer " h then
@@ -3601,8 +3671,11 @@ let start = fun ~config_path ?(config : Portal_config.t option) ~port () ->
           tasks = Portal_task.init ();
           inbox = Portal_inbox.init ~dir:(config.Portal_config.data_dir ^ "/inbox");
           ws_clients = ConcurrentHashMap.with_capacity ~size:64;
+          decision_history = Sync.Atomic.make [];
+          decisions_appended = Sync.Atomic.make 0;
         }
       in
+      load_decision_history state;
       let _ = Portal_inbox.load state.inbox in
       Portal_signals.load_parked state.signals ~path:(parked_file state);
       if

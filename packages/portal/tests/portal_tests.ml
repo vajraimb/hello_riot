@@ -2609,6 +2609,48 @@ let test_gateway_audit_has_no_content_or_keys = fun _ctx ->
         )
     )
 
+(* ---------- spec 0.3 §6: decisions.jsonl ---------- *)
+
+let test_gateway_decisions_survive_restart = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let config = { (handoff_config mocks) with Config.data_dir = unique_dir "decisions" } in
+      Mock.set_scenario (nth_mock mocks 0) { (Mock.default_scenario) with body = openai_ok_body ~content:"persist-me" };
+      let post ~port =
+        gw_post ~port ~path:"/v1/chat/completions"
+          ~headers:[ ("X-Oasis-Category", "general"); ("Content-Type", "application/json") ]
+          ~body:"{\"model\":\"m-x\",\"messages\":[{\"role\":\"user\",\"content\":\"q\"}]}"
+      in
+      let decisions ~port ~path =
+        match gw_get ~port ~path with
+        | Error _ -> []
+        | Ok (_, body) ->
+            Json.from_string body |> Result.to_option
+            |> Option.and_then ~fn:(Json.get_field "decisions")
+            |> Option.and_then ~fn:Json.get_array
+            |> Option.unwrap_or ~default:[]
+      in
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let _ = post ~port:gw.port in
+          let _ = post ~port:gw.port in
+          Test.assert_equal ~expected:2 ~actual:(List.length (decisions ~port:gw.port ~path:"/api/decisions"));
+          match Gateway.start ~config_path:None ~config ~port:0 () with
+          | Error e -> Error ("gateway restart: " ^ e)
+          | Ok gw2 ->
+              let _ = post ~port:gw2.port in
+              let ds = decisions ~port:gw2.port ~path:"/api/decisions" in
+              Test.assert_equal ~expected:3 ~actual:(List.length ds);
+              Test.assert_equal
+                ~expected:true
+                ~actual:(List.all ds ~fn:(fun d -> h_field_int d "schema" = 2 && String.equal (h_field_str d "chosen") (acc_name 0)));
+              Test.assert_equal ~expected:1 ~actual:(List.length (decisions ~port:gw2.port ~path:"/api/decisions?limit=1"));
+              Ok ()
+        )
+    )
+
 (* ---------- spec 0.3 §5.2: workdir / env whitelist ---------- *)
 
 let test_agent_resolve_workdir = fun _ctx ->
@@ -2748,6 +2790,7 @@ let tests =
     case ~size:Test.Large "gateway: quota 429 parks the account across restarts" test_gateway_quota_parks_across_restart;
     case ~size:Test.Large "gateway: bearer auth on /v1, /api, /mcp, /ws" test_gateway_bearer_auth;
     case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 404" test_gateway_loopback_guards;
+    case ~size:Test.Large "gateway: decisions.jsonl survives a restart" test_gateway_decisions_survive_restart;
     case "audit: secret redaction and hash8" test_redact_secrets;
     case ~size:Test.Large "gateway: audit log and errors carry no content or keys" test_gateway_audit_has_no_content_or_keys;
     case "agent: workdir resolution against allowed_workdirs" test_agent_resolve_workdir;
