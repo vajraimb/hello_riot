@@ -345,6 +345,22 @@ WS 事件流新增 `handoff` 事件，payload 同上一条。
    agent 执行采用 per-task blocking-lane + 看门狗，OTP 监督树集成留待运行时修复。
    跨请求共享状态统一走 `ConcurrentHashMap`（§1.4）
 
+   **[0.3 新增]** 上面的"spawn 挂起 / start_child 挂起 / 测试中 SIGSEGV"已定位为 Riot 0.0.43
+   kernel/std 的四个缺陷，以补丁形式放在 `patches/riot/`，由 `scripts/patch-riot.sh` 幂等打到
+   `~/.riot/registry/pkgs.ml/src/<pkg>/<ver>`（Riot 没有依赖覆盖机制；`riot plan` 拉源码后、
+   `riot build` 前执行，CI 同此流程）：
+
+   | 补丁 | 缺陷 | 现象 |
+   |---|---|---|
+   | kernel `generational-root` | `kernel_new_linux_update_token`（及 macOS 分支）在 `caml_modify_generational_global_root` 前先直接写 root，GC 看不到 old→young 迁移，`caml_global_roots_old` 留下悬垂指针 | 并行测试 `caml_darken` 段错误（`--large` 下 100% 复现） |
+   | std `lost-wakeups` ① | receive 超时在进程仍为 `Running` 时触发，`wake_process` 空操作；`park_for_receive` 之后只复查 mailbox、不复查超时标记 | `sleep`（= 带超时、全部 Skip 的 receive）永久挂起；Atacama `start_link` 末尾的 `sleep 5ms` 即命中点 |
+   | 同上 ② | `install_{receive,syscall}_timeout` 先加定时器、后记录 id；其间到期的定时器因 id 不匹配被丢弃 | 同上；syscall 版表现为忙等 |
+   | 同上 ③ | `step_process` 中 `has_messages && try_mark_runnable…`：`Kernel.(&&)` 是普通函数、不短路，无消息时也把 `Waiting_message` 翻成 `Runnable` 却不入队 | 进程停在 `Runnable` 但不在任何队列 |
+   | 同上 ④ | 定时器轮 `tick` 把 `current_time` 直接设为 `now`，丢弃不足一格的余量；`calculate_slot` 可能把定时器放进已处理的当前格 | reactor 循环快于一格时轮子冻结；短定时器晚一整圈触发 |
+
+   修复后 `riot test`（默认并行）连续 3 次 86/86，`portal_tests --concurrency 4/8/16` 共 60 次 0 挂起
+   （修复前 4 并发约 15–30% 挂起）。补丁应同步上游；升级 Riot 版本时须重新核对
+
 ### 4.3 数据类
 
 5. **价格字段目前全部为 0**——成本调度当前**不生效**（§2.3.1），填上后才生效；
@@ -452,7 +468,7 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 
 ### 8.0 实施状态（0.3 已全部完成）
 
-P0–P3 共 19 项均已实施，`portal_tests` 80 例全绿（串行 `--concurrency 1`），`oasis --self-test` 4/4，
+P0–P3 共 19 项均已实施，`portal_tests` 80 例全绿（串行与并行均可，需先打 §4.2 的 Riot 补丁），`oasis --self-test` 4/4，
 `riot bench` 中 `route_scored` ≈ 2µs。实施中对规格做了以下细化，正文已同步：
 
 | 条款 | 细化 / 偏差 | 理由 |
@@ -475,8 +491,14 @@ P0–P3 共 19 项均已实施，`portal_tests` 80 例全绿（串行 `--concurr
 - 无 token 时 dashboard 的宽松 CORS 允许任意网页调用 agent（见 §5.1 Origin 检查）
 - inbox 收件人名未校验即拼进文件路径（见 §5.3）
 
-仍未解决：§4.3 第 7 条（tools 不透传）；CI 在 GitHub runner 上因缺 `uuid/uuid.h` 编译 std 失败，
-且 `hello_riot` 测试引用不存在的 `Concurrency_demo` 模块——二者均早于 0.3，与本清单无关。
+- 测试 S5（粘性会话）硬编码首个请求落在 `acc_a`；S4 断流后路由器按延迟/失败历史选任一账户都合理，
+  并行负载下偶发失败。现改为"钉住实际服务的账户 → 令其失败 → 断言改钉另一个且恢复后不回切"
+
+CI（早于 0.3 即失败）已修复：runner 安装 `uuid-dev libssl-dev zlib1g-dev libpcre2-dev`，
+`riot plan` → `scripts/patch-riot.sh` → `riot build` → `riot test`；`hello_riot` 中引用已删除模块
+`Concurrency_demo` 的陈旧用例已移除。
+
+仍未解决：§4.3 第 7 条（tools 不透传）。
 **改 lib 后必须 `riot clean --force` 再 `riot test`**（§4.1）。
 
 ### P0 — 招牌能力正确性
