@@ -1096,9 +1096,16 @@ let test_gateway_end_to_end_scenarios = fun _ctx ->
                                                       | Error e -> Error ("s5a: " ^ e)
                                                       | Ok (s5a_status, s5a_body) ->
                                                           Test.assert_equal ~expected:200 ~actual:s5a_status;
-                                                          Test.assert_equal ~expected:true ~actual:(String.contains s5a_body "s5a");
-                                                          (* acc_a dies -> handoff acc_b re-pins the session *)
-                                                          Mock.set_scenario mock_a { (Mock.default_scenario) with status = 429; body = "{}" };
+                                                          (* The router may legitimately prefer either account after
+                                                             S4's mid-stream death (latency/failure history), so pin
+                                                             whichever served first and kill that one. *)
+                                                          let first_is_a = String.contains s5a_body "s5a" in
+                                                          Test.assert_equal ~expected:true ~actual:(first_is_a || String.contains s5a_body "s5b");
+                                                          let (pinned_mock, other_content, pinned_content) =
+                                                            if first_is_a then (mock_a, "s5b", "s5a") else (mock_b, "s5a", "s5b")
+                                                          in
+                                                          (* the pinned account dies -> handoff re-pins the session to the other *)
+                                                          Mock.set_scenario pinned_mock { (Mock.default_scenario) with status = 429; body = "{}" };
                                                           (
                                                             match
                                                               gw_post
@@ -1110,9 +1117,9 @@ let test_gateway_end_to_end_scenarios = fun _ctx ->
                                                             | Error e -> Error ("s5b: " ^ e)
                                                             | Ok (s5b_status, s5b_body) ->
                                                                 Test.assert_equal ~expected:200 ~actual:s5b_status;
-                                                                Test.assert_equal ~expected:true ~actual:(String.contains s5b_body "s5b");
-                                                                (* acc_a recovers, but the session stays pinned to acc_b *)
-                                                                Mock.set_scenario mock_a { (Mock.default_scenario) with body = openai_ok_body ~content:"s5a" };
+                                                                Test.assert_equal ~expected:true ~actual:(String.contains s5b_body other_content);
+                                                                (* the first account recovers, but the session stays re-pinned *)
+                                                                Mock.set_scenario pinned_mock { (Mock.default_scenario) with body = openai_ok_body ~content:pinned_content };
                                                                 (
                                                                   match
                                                                     gw_post
@@ -1126,7 +1133,7 @@ let test_gateway_end_to_end_scenarios = fun _ctx ->
                                                                       Test.assert_equal ~expected:200 ~actual:s5c_status;
                                                                       Test.assert_equal
                                                                         ~expected:true
-                                                                        ~actual:(String.contains s5c_body "s5b");
+                                                                        ~actual:(String.contains s5c_body other_content);
                                                                       (* ---- S6: MCP tools over the same gateway ---- *)
                                                                       let mcp_post body =
                                                                         gw_post
