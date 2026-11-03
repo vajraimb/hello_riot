@@ -2456,6 +2456,78 @@ let test_gateway_quota_parks_across_restart = fun _ctx ->
         )
     )
 
+(* ---------- spec 0.3 §5.1: bearer auth ---------- *)
+
+let test_gateway_bearer_auth = fun _ctx ->
+  let var = "OASIS_TEST_TOKEN_" ^ Int.to_string (Signals.now_ms ()) in
+  let _ = Env.set ~var ~value:"s3cret/+=" in
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let config = { (handoff_config mocks) with Config.auth_token_env = Some var } in
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw ->
+          let port = gw.port in
+          let status ~method_ ~path ~headers =
+            match gw_req ~method_ ~port ~path ~headers ~body:"" with
+            | Ok (s, _) -> s
+            | Error _ -> -1
+          in
+          Test.assert_equal ~expected:200 ~actual:(status ~method_:"GET" ~path:"/" ~headers:[]);
+          Test.assert_equal ~expected:401 ~actual:(status ~method_:"GET" ~path:"/api/accounts" ~headers:[]);
+          Test.assert_equal
+            ~expected:401
+            ~actual:(status ~method_:"GET" ~path:"/api/accounts" ~headers:[ ("Authorization", "Bearer wrong") ]);
+          Test.assert_equal
+            ~expected:200
+            ~actual:(status ~method_:"GET" ~path:"/api/accounts" ~headers:[ ("Authorization", "Bearer s3cret/+=") ]);
+          Test.assert_equal ~expected:401 ~actual:(status ~method_:"GET" ~path:"/v1/models" ~headers:[]);
+          Test.assert_equal ~expected:401 ~actual:(status ~method_:"POST" ~path:"/v1/chat/completions" ~headers:[]);
+          Test.assert_equal ~expected:401 ~actual:(status ~method_:"POST" ~path:"/mcp" ~headers:[]);
+          Test.assert_equal ~expected:401 ~actual:(status ~method_:"POST" ~path:"/api/reload" ~headers:[]);
+          Test.assert_equal ~expected:401 ~actual:(status ~method_:"GET" ~path:"/ws" ~headers:[]);
+          Test.assert_equal
+            ~expected:401
+            ~actual:(status ~method_:"GET" ~path:"/api/accounts?token=s3cret%2F%2B%3D" ~headers:[]);
+          Test.assert_equal ~expected:true ~actual:(String.equal (Gateway.percent_decode "s3cret%2F%2B%3D") "s3cret/+=");
+          let _ = Env.remove ~var in
+          Ok ()
+    )
+
+let test_gateway_loopback_guards = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let config = handoff_config mocks in
+      let refused =
+        match Gateway.start ~config_path:None ~config:{ config with Config.server_host = "0.0.0.0" } ~port:0 () with
+        | Ok _ -> false
+        | Error e -> String.contains e "auth_token_env"
+      in
+      Test.assert_equal ~expected:true ~actual:refused;
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw ->
+          let status ~method_ ~path ~headers =
+            match gw_req ~method_ ~port:gw.port ~path ~headers ~body:"" with
+            | Ok (s, _) -> s
+            | Error _ -> -1
+          in
+          Test.assert_equal ~expected:200 ~actual:(status ~method_:"GET" ~path:"/api/accounts" ~headers:[]);
+          Test.assert_equal
+            ~expected:200
+            ~actual:(status ~method_:"GET" ~path:"/api/accounts" ~headers:[ ("Origin", "http://127.0.0.1:9899") ]);
+          Test.assert_equal
+            ~expected:200
+            ~actual:(status ~method_:"GET" ~path:"/api/accounts" ~headers:[ ("Origin", "http://localhost:9899") ]);
+          Test.assert_equal
+            ~expected:403
+            ~actual:(status ~method_:"POST" ~path:"/v1/chat/completions" ~headers:[ ("Origin", "https://evil.example") ]);
+          Test.assert_equal ~expected:404 ~actual:(status ~method_:"GET" ~path:"/api/reload" ~headers:[]);
+          Ok ()
+    )
+
 let tests =
   Test.[
     case "chunked decoding: single chunk" test_chunked_single_chunk;
@@ -2529,6 +2601,8 @@ let tests =
     case "signals: quota reset dates" test_signals_quota_reset_at;
     case "signals: parked persistence roundtrip" test_signals_parked_roundtrip;
     case ~size:Test.Large "gateway: quota 429 parks the account across restarts" test_gateway_quota_parks_across_restart;
+    case ~size:Test.Large "gateway: bearer auth on /v1, /api, /mcp, /ws" test_gateway_bearer_auth;
+    case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 404" test_gateway_loopback_guards;
           ]
 
 let main ~args =

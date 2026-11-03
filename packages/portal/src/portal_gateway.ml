@@ -2912,6 +2912,27 @@ pre{background:#070b16;padding:8px;border-radius:6px;font-size:12px;margin:6px 0
   </div>
 </div>
 <script>
+const oasisToken = (() => {
+  const u = new URL(location.href);
+  const t = u.searchParams.get('token');
+  if (t) {
+    localStorage.setItem('oasis_token', t);
+    u.searchParams.delete('token');
+    history.replaceState(null, '', u.pathname + u.search + u.hash);
+  }
+  return localStorage.getItem('oasis_token') || '';
+})();
+const rawFetch = window.fetch.bind(window);
+window.fetch = async (url, opts = {}) => {
+  const headers = new Headers(opts.headers || {});
+  if (oasisToken) headers.set('Authorization', 'Bearer ' + oasisToken);
+  const res = await rawFetch(url, { ...opts, headers });
+  if (res.status === 401) {
+    const t = prompt('Oasis 需要访问令牌（server.auth_token_env）');
+    if (t) { localStorage.setItem('oasis_token', t.trim()); location.reload(); }
+  }
+  return res;
+};
 const log = document.getElementById('log');
 function addLine(msg, cls) {
   const div = document.createElement('div');
@@ -3002,7 +3023,7 @@ async function refreshDecisions() {
       ' | scores: ' + scores);
   }
 }
-const ws = new WebSocket('ws://' + location.host + '/ws');
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (oasisToken ? '?token=' + encodeURIComponent(oasisToken) : ''));
 ws.onopen = () => {
   const st = document.getElementById('ws-status');
   st.textContent = 'WS 已连接';
@@ -3328,11 +3349,135 @@ let handle_mcp = fun (state : state) (ctx : Trail.ctx) ->
               Trail.json ~status:Net.Http.Status.NotImplemented ctx payload
     )
 
+(* ---------- auth (spec §5.1) ---------- *)
+
+let constant_time_equal = fun a b ->
+  if String.length a != String.length b then false
+  else
+    let diff = ref 0 in
+    for i = 0 to String.length a - 1 do
+      diff := !diff lor (Char.code (String.get_unchecked a ~at:i) lxor Char.code (String.get_unchecked b ~at:i))
+    done;
+    !diff = 0
+
+let percent_decode = fun s ->
+  let n = String.length s in
+  let buf = StringBuilder.create ~size:n in
+  let hex c =
+    match c with
+    | '0' .. '9' -> Some (Char.code c - 48)
+    | 'a' .. 'f' -> Some (Char.code c - 87)
+    | 'A' .. 'F' -> Some (Char.code c - 55)
+    | _ -> None
+  in
+  let escaped i =
+    if i + 2 < n then
+      match (hex (String.get_unchecked s ~at:(i + 1)), hex (String.get_unchecked s ~at:(i + 2))) with
+      | (Some a, Some b) -> Some (Char.from_int_unchecked ((a * 16) + b))
+      | _ -> None
+    else None
+  in
+  let rec go i =
+    if i < n then
+      match String.get_unchecked s ~at:i with
+      | '%' -> (
+          match escaped i with
+          | Some c ->
+              StringBuilder.add_char buf c;
+              go (i + 3)
+          | None ->
+              StringBuilder.add_char buf '%';
+              go (i + 1)
+        )
+      | c ->
+          StringBuilder.add_char buf c;
+          go (i + 1)
+  in
+  go 0;
+  StringBuilder.contents buf
+
+let query_param = fun (ctx : Trail.ctx) name ->
+  match Net.Uri.query (Net.Http.Request.uri ctx.req) with
+  | None -> None
+  | Some q ->
+      String.split ~by:"&" q
+      |> List.filter_map ~fn:(fun kv ->
+        match String.split ~by:"=" kv with
+        | k :: rest when String.equal k name -> Some (percent_decode (String.concat "=" rest))
+        | _ -> None)
+      |> List.head
+
+let bearer_of = fun header ->
+  let h = String.trim header in
+  if String.starts_with ~prefix:"Bearer " h then
+    Some (String.trim (String.sub h ~offset:7 ~len:(String.length h - 7)))
+  else None
+
+let host_of_authority = fun authority ->
+  if String.starts_with ~prefix:"[" authority then
+    match String.split ~by:"]" authority with
+    | h :: _ -> String.sub h ~offset:1 ~len:(String.length h - 1)
+    | [] -> authority
+  else
+    match String.split ~by:":" authority with
+    | h :: _ -> h
+    | [] -> authority
+
+(** With a token configured, everything except the dashboard page needs
+    [Authorization: Bearer] ([?token=] for the WebSocket, which browsers can't
+    send headers on). Without one only loopback peers get through, and a
+    browser [Origin] must name a loopback host so other web pages (or DNS
+    rebinding) can't drive the agents via the permissive CORS headers. *)
+let use_auth = fun (state : state) (ctx : Trail.ctx) ->
+  let path = Net.Uri.path (Net.Http.Request.uri ctx.req) in
+  let deny status reason =
+    Trail.json ~status ctx (Json.obj [ ("error", Json.obj [ ("message", Json.string reason); ("type", Json.string "oasis_auth") ]) ])
+  in
+  if Net.Http.Method.equal (Net.Http.Request.method_ ctx.req) Net.Http.Method.Options then ctx
+  else if String.equal path "/" then ctx
+  else
+    match Portal_config.auth_token (Sync.Atomic.get state.config) with
+    | Some token -> (
+        let presented =
+          match get_header ctx "authorization" |> Option.and_then ~fn:bearer_of with
+          | Some t -> Some t
+          | None -> if String.equal path "/ws" then query_param ctx "token" else None
+        in
+        match presented with
+        | Some t when constant_time_equal t token -> ctx
+        | Some _ -> deny Net.Http.Status.Unauthorized "invalid token"
+        | None -> deny Net.Http.Status.Unauthorized "missing bearer token"
+      )
+    | None ->
+        if not (Portal_config.is_loopback_host (Net.Addr.ip ctx.peer)) then
+          deny Net.Http.Status.Forbidden "non-loopback peer and no server.auth_token_env configured"
+        else (
+          match get_header ctx "origin" with
+          | None -> ctx
+          | Some origin ->
+              let authority =
+                match String.split ~by:"://" origin with
+                | [ _; rest ] -> rest
+                | _ -> origin
+              in
+              if Portal_config.is_loopback_host (host_of_authority authority) then ctx
+              else deny Net.Http.Status.Forbidden ("cross-origin request from " ^ origin)
+        )
+
+let use_cors_with_auth = fun ctx ->
+  ctx
+  |> Trail.put_resp_header ~name:"Access-Control-Allow-Origin" ~value:"*"
+  |> Trail.put_resp_header ~name:"Access-Control-Allow-Methods" ~value:"GET, POST, OPTIONS"
+  |> Trail.put_resp_header
+    ~name:"Access-Control-Allow-Headers"
+    ~value:"Content-Type, Authorization, X-Oasis-Category, X-Oasis-Goal, X-Oasis-Mode, X-Oasis-Session"
+
 let build_trail = fun (state : state) ->
   Trail.pipeline
     [
       Trail.use_server_header "Oasis/0.2 (Riot; Nomad; Trail)";
-      Trail.use_cors ();
+      use_cors_with_auth;
+      use_auth state;
       Trail.router
         [
           Trail.get "/" (fun ctx -> Trail.html ctx index_html);
@@ -3383,6 +3528,13 @@ let start = fun ~config_path ?(config : Portal_config.t option) ~port () ->
   in
   match config with
   | Error e -> Error e
+  | Ok config
+    when (not (Portal_config.is_loopback_host config.Portal_config.server_host))
+         && Option.is_none (Portal_config.auth_token config) ->
+      Error
+        ("server.host = "
+        ^ config.Portal_config.server_host
+        ^ " is not loopback: set server.auth_token_env to an environment variable holding a token")
   | Ok config ->
       let state =
         {

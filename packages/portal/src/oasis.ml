@@ -18,6 +18,7 @@ let example_config =
 host = "127.0.0.1"
 port = 9899
 data_dir = "./.oasis-data"
+# auth_token_env = "OASIS_AUTH_TOKEN"   # 设置后所有 API 需 Bearer；非回环 host 必须设置
 
 [[models]]
 name = "deepseek-chat"
@@ -77,6 +78,12 @@ let rec keep_alive = fun () ->
 
 let default_server = "http://127.0.0.1:9899"
 
+(** Token for a gateway with [server.auth_token_env] set, from [OASIS_AUTH_TOKEN]. *)
+let cli_auth_headers = fun () ->
+  match Env.var Env.String ~name:"OASIS_AUTH_TOKEN" with
+  | Some t when not (String.is_empty (String.trim t)) -> [ ("Authorization", "Bearer " ^ String.trim t) ]
+  | _ -> []
+
 let cli_get = fun ~server ~path ->
   let (_scheme, host, port_opt, _path) = Portal.Gateway.parse_base_url server in
   let port = port_opt |> Option.unwrap_or ~default:80 in
@@ -85,7 +92,7 @@ let cli_get = fun ~server ~path ->
   | Error e -> Error (Client.error_to_string e)
   | Ok conn ->
       let req =
-        Client.make_request ~method_:"GET" ~path ~headers:[ ("Host", host) ] ()
+        Client.make_request ~method_:"GET" ~path ~headers:(("Host", host) :: cli_auth_headers ()) ()
       in
       let res = Client.request_string conn req in
       Client.close conn;
@@ -106,7 +113,7 @@ let cli_post_json = fun ~server ~path ~headers ~body ->
         Client.make_request
           ~method_:"POST"
           ~path
-          ~headers:(("Host", host) :: headers)
+          ~headers:(("Host", host) :: (cli_auth_headers () @ headers))
           ~body
           ()
       in
@@ -284,7 +291,7 @@ let cmd_ask = fun ~server ~prompt ~category ~goal ~stream ->
           Client.make_request
             ~method_:"POST"
             ~path:"/v1/chat/completions"
-            ~headers:(("Host", host) :: headers)
+            ~headers:(("Host", host) :: (cli_auth_headers () @ headers))
             ~body
             ()
         in
@@ -359,7 +366,8 @@ let cmd_ask = fun ~server ~prompt ~category ~goal ~stream ->
 
 let cli_usage =
   "用法: oasis [--server URL] <models|status|budget|decisions|reload|ask \"...\">\n\
-   ask 选项: --category <c> --goal <cheapest|fastest|best|balanced> [--no-stream]"
+   ask 选项: --category <c> --goal <cheapest|fastest|best|balanced> [--no-stream]\n\
+   网关启用鉴权时设置环境变量 OASIS_AUTH_TOKEN"
 
 let cli_main = fun ~server ~args ->
   let category = ref "general" in
