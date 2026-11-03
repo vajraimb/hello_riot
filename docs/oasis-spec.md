@@ -368,9 +368,16 @@ WS 事件流新增 `handoff` 事件，payload 同上一条。
 6. 输出 token 计数为 `bytes / 4` 估算，中文场景偏差可达 2–3 倍；记账以上游返回的 `usage` 为准，
    仅在上游未返回时用估算（**[0.3 新增]** 流式请求附 `stream_options.include_usage`，读末尾 usage
    chunk；Anthropic 读 `message_start`/`message_delta`；账户可用 `stream_usage = false` 关闭）
-7. **tools 不透传**：网关构造上游请求时只带 `model/messages/max_tokens/stream`，客户端的
-   `tools`/`tool_choice`/`response_format` 不会到达上游，流式导体也只转发 `content` delta。
-   §3.2 的适用范围检测保证这类请求不会被拼接前缀（走 G3），但工具调用本身目前不可用
+7. **tools 仅对 OpenAI 协议账户透传** **[0.3 修订]**：`tools`、`tool_choice`、`parallel_tool_calls`、
+   `functions`、`function_call`、`response_format` 以及 `temperature`/`top_p`/`stop`/`seed`/
+   `presence_penalty`/`frequency_penalty`/`user` 原样转发给 `protocol = "openai"` 的上游（`n` 不转发：
+   导体只中继一个 choice）。非流式响应原样返回，`tool_calls` 不受影响；流式导体把携带
+   `tool_calls`/`function_call` delta 或 `finish_reason = "tool_calls"` 的事件**逐字中继**。
+   限制：
+   - Anthropic 协议没有工具/结构化输出的格式转换：带上述前五个字段之一的请求只在 OpenAI 协议账户间
+     路由；可路由账户全为 Anthropic 时返回 `400 tools_require_openai_protocol_account`
+   - 工具调用 delta 一旦发出，该 leg 断流即以 SSE 错误结束（G0），不重启、不拼接——半截参数无法修复；
+     此前只发出过文本时仍按 §3.2 走 G3
 
 ---
 
@@ -498,7 +505,10 @@ CI（早于 0.3 即失败）已修复：runner 安装 `uuid-dev libssl-dev zlib1
 `riot plan` → `scripts/patch-riot.sh` → `riot build` → `riot test`；`hello_riot` 中引用已删除模块
 `Concurrency_demo` 的陈旧用例已移除。
 
-仍未解决：§4.3 第 7 条（tools 不透传）。
+tools 透传（原 §4.3 第 7 条"不透传"）已实施，范围与限制见 §4.3 第 7 条；新增 4 个测试
+（同步透传、流式逐字中继、工具调用中途断流 → G0、Anthropic-only → 400），`portal_tests` 共 84 例。
+
+仍未解决：Anthropic 协议账户的工具调用格式转换（`tools` ↔ `tool_use`/`tool_result`）。
 **改 lib 后必须 `riot clean --force` 再 `riot test`**（§4.1）。
 
 ### P0 — 招牌能力正确性
