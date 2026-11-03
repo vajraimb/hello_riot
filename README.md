@@ -53,3 +53,8 @@ Then add the new package path to `riot.toml` workspace members.
 - `ocaml-toolchain.toml` - OCaml toolchain version
 - `Dockerfile` - Container build template
 - `.github/workflows/ci.yml` - GitHub Actions starter workflow
+
+## 文档
+
+- [Oasis 规格与初衷](docs/oasis-spec.md) — 为什么做、架构规格、接口、已知限制
+- [规划与战报](docs/ai-portal-plan.md) — M0-M3 里程碑与 16.1~16.25 战报
