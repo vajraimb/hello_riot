@@ -55,6 +55,44 @@ let fresh = fun () ->
 let now_ms = fun () ->
   Time.Duration.to_millis (Time.SystemTime.duration_since_epoch ())
 
+(* ---------- secret redaction (spec §5.3) ---------- *)
+
+let is_secret_char = fun c ->
+  match c with
+  | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' | '.' | '~' | '+' | '/' | '=' -> true
+  | _ -> false
+
+(** Replaces the token after each [marker] with [****] when it is at least
+    [min_len] characters long. *)
+let mask_after = fun s ~marker ~min_len ->
+  let n = String.length s in
+  let m = String.length marker in
+  let out = StringBuilder.create ~size:n in
+  let matches_at i =
+    if i + m > n then false else String.equal (String.sub s ~offset:i ~len:m) marker
+  in
+  let rec token_end j = if j < n then if is_secret_char (String.get_unchecked s ~at:j) then token_end (j + 1) else j else j in
+  let rec go i =
+    if i < n then
+      if matches_at i then (
+        let j = token_end (i + m) in
+        StringBuilder.add_string out marker;
+        if j - (i + m) >= min_len then StringBuilder.add_string out "****"
+        else StringBuilder.add_string out (String.sub s ~offset:(i + m) ~len:(j - (i + m)));
+        go j
+      ) else (
+        StringBuilder.add_char out (String.get_unchecked s ~at:i);
+        go (i + 1)
+      )
+  in
+  go 0;
+  StringBuilder.contents out
+
+(** Upstream error bodies sometimes echo the key back; nothing that reaches
+    decisions, signals, the dashboard or logs may carry one. *)
+let redact_secrets = fun s ->
+  mask_after s ~marker:"Bearer " ~min_len:1 |> mask_after ~marker:"sk-" ~min_len:8
+
 (* ---------- failure classification (spec §2.4.1) ---------- *)
 
 let default_quota_markers =
@@ -209,7 +247,7 @@ let record_failure = fun (s : signals) ~error now_ms ->
     in_flight = max 0 (s.in_flight - 1);
     breaker =
       (if tripped then Open_until (now_ms + 30000) else s.breaker);
-    last_error = Some error;
+    last_error = Some (redact_secrets error);
   }
 
 (** Quota/balance exhaustion: park until [until_ms]. Not a latency sample and
@@ -219,7 +257,7 @@ let record_quota = fun (s : signals) ~error ~until_ms ->
     s with
     in_flight = max 0 (s.in_flight - 1);
     parked_until_ms = max s.parked_until_ms until_ms;
-    last_error = Some error;
+    last_error = Some (redact_secrets error);
   }
 
 (** The request itself was rejected (4xx): no breaker impact; 401/403 flag
@@ -229,7 +267,7 @@ let record_client_error = fun (s : signals) ~error ~auth ->
     s with
     in_flight = max 0 (s.in_flight - 1);
     auth_invalid = s.auth_invalid || auth;
-    last_error = Some error;
+    last_error = Some (redact_secrets error);
   }
 
 let mark_in_flight = fun (s : signals) ->

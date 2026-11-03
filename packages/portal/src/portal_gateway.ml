@@ -304,6 +304,14 @@ let new_request_id = fun () ->
   "req-" ^ Int.to_string (pick 1000000000)
 
 let record_decision = fun (state : state) (d : Portal_router.decision) ->
+  let d =
+    {
+      d with
+      Portal_router.attempts =
+        List.map d.Portal_router.attempts ~fn:(fun (a : Portal_router.attempt) ->
+          { a with Portal_router.error = Option.map a.Portal_router.error ~fn:Portal_signals.redact_secrets });
+    }
+  in
   let _ = Agent.get_and_update state.decisions ~fn:(fun ds -> ((), List.take (d :: ds) ~len:200)) in
   broadcast_json
     state
@@ -1254,7 +1262,21 @@ let audit_file = fun (state : state) ->
   let config = Sync.Atomic.get state.config in
   config.Portal_config.data_dir ^ "/requests.jsonl"
 
-let audit_log = fun (state : state) ~path ~category ~goal ~stream_ () ->
+(** FNV-1a (32-bit) as 8 hex digits: lets the audit log correlate identical
+    requests without storing their content. *)
+let hash8 = fun s ->
+  let h = ref 0x811c9dc5 in
+  for i = 0 to String.length s - 1 do
+    h := ((!h lxor Char.code (String.get_unchecked s ~at:i)) * 0x01000193) land 0xffffffff
+  done;
+  let hex = "0123456789abcdef" in
+  String.concat ""
+    (List.init ~count:8 ~fn:(fun k ->
+      let nib = (!h lsr ((7 - k) * 4)) land 0xf in
+      String.sub hex ~offset:nib ~len:1))
+
+(** One line per request: metadata only, never prompt or completion text. *)
+let audit_log = fun (state : state) ~path ~category ~goal ~stream_ ?(request_id = "") ?(body = "") () ->
   let line =
     Json.to_string
       (Json.obj
@@ -1264,6 +1286,9 @@ let audit_log = fun (state : state) ~path ~category ~goal ~stream_ () ->
           ("category", Json.string category);
           ("goal", Json.string goal);
           ("stream", Json.bool stream_);
+          ("request_id", Json.string request_id);
+          ("body_len", Json.int (String.length body));
+          ("body_hash8", Json.string (hash8 body));
         ])
     ^ "\n"
   in
@@ -1291,7 +1316,7 @@ let handle_list_requests = fun (state : state) (ctx : Trail.ctx) ->
 
 
 let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(category : string) ~(stream_requested : bool) ~(request_id : string) ->
-  audit_log state ~path:"/agent-path-enter" ~category ~goal:"-" ~stream_:stream_requested ();
+  audit_log state ~path:"/agent-path-enter" ~category ~goal:"-" ~stream_:stream_requested ~request_id ();
   let config = Sync.Atomic.get state.config in
   let model =
     Json.get_field "model" body |> Option.and_then ~fn:Json.get_string
@@ -1914,14 +1939,16 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
     get_header ctx "x-oasis-goal"
     |> Option.unwrap_or ~default:config.Portal_config.policy.Portal_config.goal
   in
+  let request_id = new_request_id () in
   audit_log
     state
     ~path:"/v1/chat/completions"
     ~category
     ~goal:goal_str
-    ~stream_:(Json.get_field "stream" body |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false)
+    ~stream_:stream_requested
+    ~request_id
+    ~body:(Net.Http.Request.body_string ctx.req |> Option.unwrap_or ~default:"")
     ();
-  let request_id = new_request_id () in
   broadcast_event
     state
     ~type_:"task_started"

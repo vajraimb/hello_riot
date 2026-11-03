@@ -2558,6 +2558,57 @@ let test_gateway_loopback_guards = fun _ctx ->
           Ok ()
     )
 
+(* ---------- spec 0.3 §5.3: audit redaction ---------- *)
+
+let test_redact_secrets = fun _ctx ->
+  Test.assert_equal
+    ~expected:"auth failed for Bearer ****, retry"
+    ~actual:(Signals.redact_secrets "auth failed for Bearer abc.DEF-123, retry");
+  Test.assert_equal
+    ~expected:"{\"error\":\"Incorrect API key provided: sk-****\"}"
+    ~actual:(Signals.redact_secrets "{\"error\":\"Incorrect API key provided: sk-proj-AbCdEf123456\"}");
+  Test.assert_equal ~expected:"task-list ok" ~actual:(Signals.redact_secrets "task-list ok");
+  Test.assert_equal ~expected:"sk-short" ~actual:(Signals.redact_secrets "sk-short");
+  Test.assert_equal ~expected:(Gateway.hash8 "abc") ~actual:(Gateway.hash8 "abc");
+  Test.assert_equal ~expected:8 ~actual:(String.length (Gateway.hash8 "abc"));
+  Test.assert_equal ~expected:"811c9dc5" ~actual:(Gateway.hash8 "");
+  Test.assert_equal ~expected:false ~actual:(String.equal (Gateway.hash8 "abc") (Gateway.hash8 "abd"));
+  Ok ()
+
+let test_gateway_audit_has_no_content_or_keys = fun _ctx ->
+  match start_mocks 2 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let base = handoff_config mocks in
+      let config = { base with Config.data_dir = unique_dir "audit" } in
+      Mock.set_scenario (nth_mock mocks 0)
+        { (Mock.default_scenario) with status = 401; body = "{\"error\":\"Incorrect API key provided: sk-live-0123456789abcdef\"}" };
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with body = openai_ok_body ~content:"fine" };
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let body = "{\"model\":\"m-x\",\"messages\":[{\"role\":\"user\",\"content\":\"PRIVATE-PROMPT-TEXT\"}]}" in
+          match
+            gw_post ~port:gw.port ~path:"/v1/chat/completions"
+              ~headers:[ ("X-Oasis-Category", "general"); ("Content-Type", "application/json") ]
+              ~body
+          with
+          | Error e -> Error e
+          | Ok (_, resp) ->
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "fine");
+              let get path = match gw_get ~port:gw.port ~path with Ok (_, b) -> b | Error e -> e in
+              let requests = get "/api/requests" in
+              Test.assert_equal ~expected:false ~actual:(String.contains requests "PRIVATE-PROMPT-TEXT");
+              Test.assert_equal
+                ~expected:true
+                ~actual:(String.contains requests ("\"body_len\":" ^ Int.to_string (String.length body)));
+              Test.assert_equal ~expected:true ~actual:(String.contains requests ("\"body_hash8\":\"" ^ Gateway.hash8 body ^ "\""));
+              List.for_each [ "/api/decisions"; "/api/accounts"; "/api/requests" ] ~fn:(fun p ->
+                Test.assert_equal ~expected:false ~actual:(String.contains (get p) "0123456789abcdef"));
+              Ok ()
+        )
+    )
+
 (* ---------- spec 0.3 §5.2: workdir / env whitelist ---------- *)
 
 let test_agent_resolve_workdir = fun _ctx ->
@@ -2697,6 +2748,8 @@ let tests =
     case ~size:Test.Large "gateway: quota 429 parks the account across restarts" test_gateway_quota_parks_across_restart;
     case ~size:Test.Large "gateway: bearer auth on /v1, /api, /mcp, /ws" test_gateway_bearer_auth;
     case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 404" test_gateway_loopback_guards;
+    case "audit: secret redaction and hash8" test_redact_secrets;
+    case ~size:Test.Large "gateway: audit log and errors carry no content or keys" test_gateway_audit_has_no_content_or_keys;
     case "agent: workdir resolution against allowed_workdirs" test_agent_resolve_workdir;
     case ~size:Test.Large "agent: env whitelist hides API keys" test_agent_env_whitelist;
           ]
