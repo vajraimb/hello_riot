@@ -1,0 +1,198 @@
+[server]
+host = "127.0.0.1"
+port = 9899
+data_dir = "./.oasis-data"
+
+# 模型知识库 —— 每家 provider 只放主打（+必要的便宜快速档），价格未知暂置 0
+#（拿到真实价格后填写，成本调度才会精确）
+
+[[models]]
+name = "deepseek-v4-pro"
+tier = 5
+strengths = ["coding", "analysis", "general", "writing"]
+weaknesses = []
+context_window = 1000000
+max_output = 64000
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "deepseek-flash"
+tier = 3
+strengths = ["coding", "general"]
+weaknesses = ["writing", "long_doc"]
+context_window = 128000
+max_output = 16384
+latency = "fast"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "k3-agent"
+tier = 5
+strengths = ["analysis", "general", "long_doc", "writing"]
+weaknesses = []
+context_window = 1000000
+max_output = 128000
+latency = "slow"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "glm-5.3"
+tier = 5
+strengths = ["general", "writing", "analysis", "coding"]
+weaknesses = []
+context_window = 200000
+max_output = 32768
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "qwen/qwen3.8-max-prime"
+tier = 5
+strengths = ["coding", "analysis", "general", "writing"]
+weaknesses = []
+context_window = 128000
+max_output = 16384
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "deepseek/deepseek-v4.1-flash"
+tier = 3
+strengths = ["coding", "general"]
+weaknesses = []
+context_window = 128000
+max_output = 16384
+latency = "fast"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[accounts]]
+name = "deepseek_pro"
+provider = "deepseek"
+base_url = "https://api.deepseek.com"
+api_key_env = "deepseek_api_key"
+models = ["deepseek-v4-pro", "deepseek-flash"]
+enabled = true
+rpm = 60
+tpm = 200000
+daily_limit = 500
+monthly_budget_nano = 5000000000
+
+[[accounts]]
+name = "kimi_work"
+provider = "kimi"
+base_url = "https://agent-gw.kimi.com/coding/v1"
+api_key_env = "kimi_work_key"
+models = ["k3-agent"]
+enabled = true
+rpm = 30
+tpm = 200000
+daily_limit = 200
+monthly_budget_nano = 8000000000
+
+[[accounts]]
+name = "glm_zai"
+provider = "glm"
+protocol = "anthropic"
+thinking = "disabled"
+base_url = "https://api.z.ai/api/anthropic"
+api_key_env = "glm_zai_key"
+models = ["glm-5.3"]
+enabled = true
+rpm = 30
+tpm = 100000
+daily_limit = 200
+monthly_budget_nano = 3000000000
+
+[[accounts]]
+name = "openrouter"
+provider = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+models = ["qwen/qwen3.8-max-prime", "deepseek/deepseek-v4.1-flash"]
+enabled = true
+rpm = 60
+tpm = 200000
+daily_limit = 200
+monthly_budget_nano = 5000000000
+
+# 本地 Agent 池（需要 tools 的任务走这里；X-Oasis-Mode 头可显式切换）
+# 本机 CLI 可用性以实际为准：不可用的会被熔断自动隔离
+[[agents]]
+name = "claude_code"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "{prompt}"]
+models = ["claude-opus-4-6"]
+home = "/Users/vajra"
+workdir = ""
+timeout_s = 600
+capabilities = ["terminal", "files", "web"]
+tier = 5
+strengths = ["coding", "analysis", "general"]
+weaknesses = []
+context_window = 200000
+max_output = 32768
+latency = "slow"
+enabled = true
+concurrency_limit = 2
+
+[[agents]]
+name = "opencode"
+command = "opencode"
+args = ["run", "{prompt}"]
+models = []
+home = "/Users/vajra"
+workdir = ""
+timeout_s = 600
+capabilities = ["terminal", "files"]
+tier = 4
+strengths = ["coding"]
+weaknesses = []
+context_window = 200000
+max_output = 32768
+latency = "slow"
+enabled = false
+concurrency_limit = 2
+
+[[agents]]
+name = "gemini_cli"
+command = "gemini"
+args = ["-p", "{prompt}"]
+models = []
+home = "/Users/vajra"
+workdir = ""
+timeout_s = 600
+capabilities = ["web"]
+tier = 4
+strengths = ["general", "writing"]
+weaknesses = []
+context_window = 1000000
+max_output = 32768
+latency = "medium"
+enabled = false
+concurrency_limit = 2
+
+[[routes]]
+category = "general"
+accounts = ["kimi_work", "deepseek_pro", "glm_zai", "openrouter"]
+
+[[routes]]
+category = "coding"
+accounts = ["deepseek_pro", "kimi_work", "openrouter"]
+
+[policy]
+goal = "balanced"
+agent_categories = ["coding"]
+max_fallback = 1

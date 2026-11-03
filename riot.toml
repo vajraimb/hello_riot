@@ -1,0 +1,13 @@
+[workspace]
+name = "hello_riot"
+members = [
+  "packages/hello_riot",
+  "packages/app",
+  "packages/portal",
+]
+
+[dependencies]
+# Shared external dependencies
+
+[profile.debug]
+kind = "native"

@@ -1,0 +1,443 @@
+open Std
+
+module Json = Std.Data.Json
+
+(** v1 static scheduler: hard-constraint filtering over a category routing
+    table, producing an explainable decision (chosen account, fallback chain,
+    and per-account rejection reasons). Pure w.r.t. account state, which is
+    injected as lookup functions. *)
+
+type task = {
+  category: string;
+  model: string option;
+  est_in_tokens: int;
+  est_out_tokens: int;
+}
+
+type rejected = {
+  account: string;
+  reason: string;
+}
+
+type attempt = {
+  account: string;
+  model: string;
+  status: int option;
+  error: string option;
+  latency_ms: int;
+  cost_nano: int;
+}
+
+type decision = {
+  task_category: string;
+  chosen: string option;
+  fallback_order: string list;
+  rejected: rejected list;
+  attempts: attempt list;
+  scores: (string * int) list;
+}
+
+type goal =
+  | Cheapest
+  | Fastest
+  | Best
+  | Balanced
+
+let goal_of_string = function
+  | "cheapest" -> Cheapest
+  | "fastest" -> Fastest
+  | "best" -> Best
+  | _ -> Balanced
+
+type account_snapshot = {
+  latency_ema_ms: int;
+  in_flight: int;
+  breaker_open: bool;
+  requests_in_window: int;
+}
+
+type lookups = {
+  month_spent: string -> int;
+  day_requests: string -> int;
+}
+
+let empty_decision = fun category ->
+  {
+    task_category = category;
+    chosen = None;
+    fallback_order = [];
+    rejected = [];
+    attempts = [];
+    scores = [];
+  }
+
+let decision_json = fun (d : decision) ->
+  Json.obj
+    [
+      ("task_category", Json.string d.task_category);
+      (
+        "chosen",
+        match d.chosen with Some c -> Json.string c | None -> Json.null
+      );
+      (
+        "fallback_order",
+        Json.array (List.map d.fallback_order ~fn:Json.string)
+      );
+      (
+        "rejected",
+        Json.array
+          (List.map
+            d.rejected
+            ~fn:(fun r ->
+              Json.obj
+                [
+                  ("account", Json.string r.account);
+                  ("reason", Json.string r.reason);
+                ]))
+      );
+      (
+        "attempts",
+        Json.array
+          (List.map
+            d.attempts
+            ~fn:(fun a ->
+              Json.obj
+                [
+                  ("account", Json.string a.account);
+                  ("model", Json.string a.model);
+                  (
+                    "status",
+                    match a.status with
+                    | Some s -> Json.int s
+                    | None -> Json.null
+                  );
+                  (
+                    "error",
+                    match a.error with
+                    | Some e -> Json.string e
+                    | None -> Json.null
+                  );
+                  ("latency_ms", Json.int a.latency_ms);
+                  ("cost_nano", Json.int a.cost_nano);
+                ]))
+      );
+      (
+        "scores",
+        Json.array
+          (List.map
+            d.scores
+            ~fn:(fun (name, score) ->
+              Json.obj
+                [
+                  ("account", Json.string name);
+                  ("score", Json.int score);
+                ]))
+      );
+    ]
+
+let route = fun (config : Portal_config.t) (lookups : lookups) (task : task) ->
+  let candidates =
+    match Portal_config.route_for config task.category with
+    | Some r -> r.Portal_config.accounts
+    | None ->
+        List.map
+          config.Portal_config.accounts
+          ~fn:(fun a -> a.Portal_config.name)
+  in
+  let rejects = ref [] in
+  let check (name : string) : bool =
+    match Portal_config.find_account config name with
+    | None ->
+        rejects := { account = name; reason = "unknown_account" } :: !rejects;
+        false
+    | Some acc ->
+        if not acc.Portal_config.enabled then (
+          rejects := { account = name; reason = "disabled" } :: !rejects;
+          false
+        ) else
+          let model_opt =
+            match task.model with
+            | Some m ->
+                if List.any acc.Portal_config.models ~fn:(String.equal m) then
+                  Some m
+                else
+                  None
+            | None -> List.head acc.Portal_config.models
+          in
+          (
+            match model_opt with
+            | None ->
+                rejects := { account = name; reason = "model_not_served" } :: !rejects;
+                false
+            | Some model -> (
+                match Portal_kb.find config.Portal_config.kb model with
+                | None -> true
+                | Some kb_entry ->
+                    let fits_context =
+                      Portal_kb.context_ok
+                        kb_entry
+                        ~in_tokens:task.est_in_tokens
+                        ~out_tokens:task.est_out_tokens
+                    in
+                    let est_cost =
+                      Portal_kb.est_cost_nano
+                        kb_entry
+                        ~cache_tokens:0
+                        ~in_tokens:task.est_in_tokens
+                        ~out_tokens:task.est_out_tokens
+                    in
+                    let spent = lookups.month_spent name in
+                    let budget_ok =
+                      if acc.Portal_config.monthly_budget_nano <= 0 then
+                        true
+                      else
+                        spent + est_cost <= acc.Portal_config.monthly_budget_nano
+                    in
+                    let day_ok =
+                      if acc.Portal_config.daily_limit <= 0 then
+                        true
+                      else
+                        lookups.day_requests name < acc.Portal_config.daily_limit
+                    in
+                    if not fits_context then (
+                      rejects :=
+                        { account = name; reason = "context_too_small" } :: !rejects;
+                      false
+                    ) else if not budget_ok then (
+                      rejects :=
+                        { account = name; reason = "budget_exhausted" } :: !rejects;
+                      false
+                    ) else if not day_ok then (
+                      rejects :=
+                        { account = name; reason = "daily_limit_reached" } :: !rejects;
+                      false
+                    ) else
+                      true
+              )
+          )
+  in
+  let passing = List.filter candidates ~fn:check in
+  let chosen = List.head passing in
+  let fallback_order =
+    match chosen with
+    | None -> []
+    | Some c ->
+        List.filter passing ~fn:(fun a -> not (String.equal a c))
+        |> List.take ~len:(max 0 config.Portal_config.policy.Portal_config.max_fallback)
+  in
+  {
+    task_category = task.category;
+    chosen;
+    fallback_order;
+    rejected = List.rev !rejects;
+    attempts = [];
+    scores = [];
+  }
+
+(* ---------- v2: real-time scored routing ---------- *)
+
+type scored_lookups = {
+  month_spent: string -> int;
+  day_requests: string -> int;
+  snapshot: string -> account_snapshot;
+}
+
+type weights = {
+  w_fit: int;
+  w_cost: int;
+  w_lat: int;
+  w_load: int;
+}
+
+let weights_of_goal = function
+  | Cheapest -> { w_fit = 20; w_cost = 70; w_lat = 5; w_load = 5 }
+  | Fastest -> { w_fit = 10; w_cost = 10; w_lat = 70; w_load = 10 }
+  | Best -> { w_fit = 70; w_cost = 10; w_lat = 10; w_load = 10 }
+  | Balanced -> { w_fit = 35; w_cost = 25; w_lat = 20; w_load = 20 }
+
+let latency_score = fun ~ema_ms ->
+  (* ema 0 → 100; every 20ms of EMA costs 1 point, floor 0 *)
+  max 0 (100 - (ema_ms / 20))
+
+let load_score = fun ~in_flight ->
+  max 0 (100 - (in_flight * 15))
+
+let route_scored =
+  fun
+    (config : Portal_config.t)
+    (lookups : scored_lookups)
+    ~(goal : goal)
+    (task : task) ->
+  let candidates =
+    match Portal_config.route_for config task.category with
+    | Some r -> r.Portal_config.accounts
+    | None ->
+        List.map
+          config.Portal_config.accounts
+          ~fn:(fun a -> a.Portal_config.name)
+  in
+  let rejects = ref [] in
+  (* returns (name, model, price_nano, fit, lat_score, load_score) *)
+  let check (name : string) : (string * string * int * int * int * int) option =
+    match Portal_config.find_account config name with
+    | None ->
+        rejects := { account = name; reason = "unknown_account" } :: !rejects;
+        None
+    | Some acc ->
+        if not acc.Portal_config.enabled then (
+          rejects := { account = name; reason = "disabled" } :: !rejects;
+          None
+        ) else
+          let model_opt =
+            match task.model with
+            | Some m ->
+                if List.any acc.Portal_config.models ~fn:(String.equal m) then
+                  Some m
+                else
+                  None
+            | None -> List.head acc.Portal_config.models
+          in
+          (
+            match model_opt with
+            | None ->
+                rejects := { account = name; reason = "model_not_served" } :: !rejects;
+                None
+            | Some model ->
+                let kb_entry = Portal_kb.find config.Portal_config.kb model in
+                let fits_context =
+                  match kb_entry with
+                  | None -> true
+                  | Some kbe ->
+                      Portal_kb.context_ok
+                        kbe
+                        ~in_tokens:task.est_in_tokens
+                        ~out_tokens:task.est_out_tokens
+                in
+                let price_nano =
+                  match kb_entry with
+                  | None -> 0
+                  | Some kbe ->
+                      Portal_kb.est_cost_nano
+                        kbe
+                        ~cache_tokens:0
+                        ~in_tokens:task.est_in_tokens
+                        ~out_tokens:task.est_out_tokens
+                    in
+                let fit =
+                  match kb_entry with
+                  | None -> 50
+                  | Some kbe -> Portal_kb.fit kbe ~category:task.category
+                in
+                let spent = lookups.month_spent name in
+                let budget_ok =
+                  if acc.Portal_config.monthly_budget_nano <= 0 then
+                    true
+                  else
+                    spent + price_nano <= acc.Portal_config.monthly_budget_nano
+                in
+                let day_ok =
+                  if acc.Portal_config.daily_limit <= 0 then
+                    true
+                  else
+                    lookups.day_requests name < acc.Portal_config.daily_limit
+                in
+                let snap = lookups.snapshot name in
+                let breaker_ok = not snap.breaker_open in
+                let rpm_ok =
+                  if acc.Portal_config.rpm <= 0 then
+                    true
+                  else
+                    snap.requests_in_window < acc.Portal_config.rpm
+                in
+                let ok =
+                  fits_context
+                  && budget_ok
+                  && day_ok
+                  && breaker_ok
+                  && rpm_ok
+                in
+                if ok then
+                  Some
+                    ( name,
+                      model,
+                      price_nano,
+                      fit,
+                      latency_score ~ema_ms:snap.latency_ema_ms,
+                      load_score ~in_flight:snap.in_flight )
+                else (
+                  let reason =
+                    if not fits_context then
+                      "context_too_small"
+                    else if not budget_ok then
+                      "budget_exhausted"
+                    else if not day_ok then
+                      "daily_limit_reached"
+                    else if not breaker_ok then
+                      "circuit_open"
+                    else
+                      "rpm_exhausted"
+                  in
+                  rejects := { account = name; reason } :: !rejects;
+                  None
+                )
+          )
+  in
+  let passing = List.filter_map candidates ~fn:check in
+  let min_price =
+    List.fold_left
+      passing
+      ~init:0
+      ~fn:(fun acc (_, _, p, _, _, _) ->
+        if acc = 0 then p else min acc p)
+  in
+  let max_price =
+    List.fold_left passing ~init:0 ~fn:(fun acc (_, _, p, _, _, _) -> max acc p)
+  in
+  let cost_score p =
+    if max_price = min_price then 100
+    else 100 - (((p - min_price) * 100) / (max_price - min_price))
+  in
+  let weights = weights_of_goal goal in
+  let indexed =
+    List.map
+      (List.enumerate passing)
+      ~fn:(fun (idx, (name, model, price, fit, lat, load)) ->
+        let c_score = cost_score price in
+        let total =
+          ((weights.w_fit * fit)
+          + (weights.w_cost * c_score)
+          + (weights.w_lat * lat)
+          + (weights.w_load * load))
+          / 100
+        in
+        (idx, name, model, total))
+  in
+  let sorted =
+    List.sort
+      indexed
+      ~compare:(fun (i1, _, _, s1) (i2, _, _, s2) ->
+        if s1 > s2 then LT
+        else if s1 < s2 then GT
+        else if i1 < i2 then LT
+        else if i1 > i2 then GT
+        else EQ)
+  in
+  let chosen =
+    List.head sorted |> Option.map ~fn:(fun (_, name, _, _) -> name)
+  in
+  let fallback_order =
+    match chosen with
+    | None -> []
+    | Some c ->
+        List.filter_map sorted ~fn:(fun (_, name, _, _) ->
+          if String.equal name c then None else Some name)
+        |> List.take ~len:(max 0 config.Portal_config.policy.Portal_config.max_fallback)
+  in
+  {
+    task_category = task.category;
+    chosen;
+    fallback_order;
+    rejected = List.rev !rejects;
+    attempts = [];
+    scores = List.map sorted ~fn:(fun (_, name, _, s) -> (name, s));
+  }

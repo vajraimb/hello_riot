@@ -1,0 +1,24 @@
+[package]
+name = "portal"
+version = "0.1.0"
+
+[lib]
+path = "src/portal.ml"
+
+[dependencies]
+std = "*"
+hello_riot = { path = "../hello_riot" }
+
+[[bin]]
+name = "portal_probe"
+path = "examples/https_probe.ml"
+
+
+[[bin]]
+name = "oasis"
+path = "src/oasis.ml"
+
+[[bin]]
+name = "oasis-mock"
+path = "examples/oasis_mock.ml"
+

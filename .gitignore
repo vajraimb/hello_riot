@@ -1,0 +1,18 @@
+# riot build outputs
+_build/
+# fake home (registry/toolchains)
+.fakehome/
+packages/*/.fakehome/
+# runtime data
+.oasis-data/
+.oasis-test-data/
+packages/*/.oasis-test-data/
+.oasis-demo-data/
+.oasis-selftest-data/
+*.log
+.gw-debug-*
+.write_probe*
+.oasis-test-config*.toml
+.DS_Store
+dist/
+megacap/

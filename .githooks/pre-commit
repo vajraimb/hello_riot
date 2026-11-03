@@ -1,0 +1,8 @@
+
+#!/bin/sh
+set -eu
+
+riot fmt
+riot fix
+riot build
+riot test --small

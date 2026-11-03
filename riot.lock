@@ -1,0 +1,97 @@
+format_version = 1
+
+dependency_hash = "866a6b0511889ac0"
+
+[[packages]]
+name = "hello_riot"
+root = "packages/hello_riot"
+provenance = { kind = "workspace" }
+dependencies = [{ name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
+build_dependencies = []
+dev_dependencies = []
+
+[[packages]]
+name = "app"
+root = "packages/app"
+provenance = { kind = "workspace" }
+dependencies = [{ name = "hello_riot", package = { name = "hello_riot" } }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
+build_dependencies = []
+dev_dependencies = []
+
+[[packages]]
+name = "portal"
+root = "packages/portal"
+provenance = { kind = "workspace" }
+dependencies = [{ name = "hello_riot", package = { name = "hello_riot" } }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
+build_dependencies = []
+dev_dependencies = []
+
+[[packages]]
+name = "fixme"
+registry = "pkgs.ml"
+version = "0.0.43"
+sha256 = "172b12bbf00404b2eca036064b7f7d6afbdb86465b9a454a6c66792a7177294a"
+provenance = { kind = "registry", registry = "pkgs.ml" }
+dependencies = [{ name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }, { name = "syn", version = "0.0.36", sha256 = "57c88da3212b719155fae7dd688a5f62cd08bbef730c3072dca340ece00827e8" }]
+build_dependencies = []
+dev_dependencies = []
+
+[[packages]]
+name = "std"
+registry = "pkgs.ml"
+version = "0.0.43"
+sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63"
+provenance = { kind = "registry", registry = "pkgs.ml" }
+dependencies = [{ name = "kernel", version = "0.0.43", sha256 = "8b91b1fb9db10cbc312239435ec5e1d57c4166a3c89c803670b44a06a4476a5e" }]
+build_dependencies = [{ name = "fixme", version = "0.0.43", sha256 = "172b12bbf00404b2eca036064b7f7d6afbdb86465b9a454a6c66792a7177294a" }]
+dev_dependencies = [{ name = "propane", version = "0.0.43", sha256 = "4018e2a80711257437a161e6579373d9ba7c8f623e64e551b02a7634bf3cb47e" }]
+
+[[packages]]
+name = "propane"
+registry = "pkgs.ml"
+version = "0.0.43"
+sha256 = "4018e2a80711257437a161e6579373d9ba7c8f623e64e551b02a7634bf3cb47e"
+provenance = { kind = "registry", registry = "pkgs.ml" }
+dependencies = [{ name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
+build_dependencies = []
+dev_dependencies = []
+
+[[packages]]
+name = "syn"
+registry = "pkgs.ml"
+version = "0.0.36"
+sha256 = "57c88da3212b719155fae7dd688a5f62cd08bbef730c3072dca340ece00827e8"
+provenance = { kind = "registry", registry = "pkgs.ml" }
+dependencies = [{ name = "colors", version = "0.0.43", sha256 = "8e5b37a811810928e6b3a1d3efb1e6c98482a7cde690b6ca561b2eb59b58b52a" }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }, { name = "tty", version = "0.0.43", sha256 = "130d8ce7986847f996c8b8964eda884f24fb1562b56ab65a5df7faaf60de85e6" }]
+build_dependencies = []
+dev_dependencies = []
+
+[[packages]]
+name = "colors"
+registry = "pkgs.ml"
+version = "0.0.43"
+sha256 = "8e5b37a811810928e6b3a1d3efb1e6c98482a7cde690b6ca561b2eb59b58b52a"
+provenance = { kind = "registry", registry = "pkgs.ml" }
+dependencies = [{ name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
+build_dependencies = []
+dev_dependencies = []
+
+[[packages]]
+name = "tty"
+registry = "pkgs.ml"
+version = "0.0.43"
+sha256 = "130d8ce7986847f996c8b8964eda884f24fb1562b56ab65a5df7faaf60de85e6"
+provenance = { kind = "registry", registry = "pkgs.ml" }
+dependencies = [{ name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
+build_dependencies = []
+dev_dependencies = [{ name = "propane", version = "0.0.43", sha256 = "4018e2a80711257437a161e6579373d9ba7c8f623e64e551b02a7634bf3cb47e" }]
+
+[[packages]]
+name = "kernel"
+registry = "pkgs.ml"
+version = "0.0.43"
+sha256 = "8b91b1fb9db10cbc312239435ec5e1d57c4166a3c89c803670b44a06a4476a5e"
+provenance = { kind = "registry", registry = "pkgs.ml" }
+dependencies = []
+build_dependencies = [{ name = "fixme", version = "0.0.43", sha256 = "172b12bbf00404b2eca036064b7f7d6afbdb86465b9a454a6c66792a7177294a" }]
+dev_dependencies = [{ name = "propane", version = "0.0.43", sha256 = "4018e2a80711257437a161e6579373d9ba7c8f623e64e551b02a7634bf3cb47e" }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
