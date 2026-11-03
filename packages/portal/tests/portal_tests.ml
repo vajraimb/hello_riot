@@ -2651,6 +2651,54 @@ let test_gateway_decisions_survive_restart = fun _ctx ->
         )
     )
 
+(* ---------- spec 0.3 §6: streaming usage ---------- *)
+
+let test_gateway_stream_usage_recorded = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let base = handoff_config mocks in
+      let config =
+        {
+          base with
+          Config.data_dir = unique_dir "usage";
+          accounts = List.map base.Config.accounts ~fn:(fun a -> { a with Config.stream_usage = true });
+        }
+      in
+      Mock.set_scenario (nth_mock mocks 0)
+        {
+          (Mock.default_scenario) with
+          sse =
+            [
+              "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}";
+              "{\"choices\":[],\"usage\":{\"prompt_tokens\":1234,\"completion_tokens\":567,\"total_tokens\":1801}}";
+            ];
+        };
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          match h_stream ~port:gw.port () with
+          | Error e -> Error e
+          | Ok (_, _, deltas) -> (
+              Test.assert_equal ~expected:"hi" ~actual:(String.concat "" deltas);
+              let upstream = Json.from_string (Mock.last_request (nth_mock mocks 0)) |> Result.to_option in
+              Test.assert_equal
+                ~expected:(Some true)
+                ~actual:
+                  (upstream
+                  |> Option.and_then ~fn:(Json.get_field "stream_options")
+                  |> Option.and_then ~fn:(Json.get_field "include_usage")
+                  |> Option.and_then ~fn:Json.get_bool);
+              match gw_get ~port:gw.port ~path:"/api/ledger" with
+              | Error e -> Error e
+              | Ok (_, body) ->
+                  Test.assert_equal ~expected:true ~actual:(String.contains body "\"in_tokens\":1234");
+                  Test.assert_equal ~expected:true ~actual:(String.contains body "\"out_tokens\":567");
+                  Ok ()
+            )
+        )
+    )
+
 (* ---------- spec 0.3 §5.2: workdir / env whitelist ---------- *)
 
 let test_agent_resolve_workdir = fun _ctx ->
@@ -2791,6 +2839,7 @@ let tests =
     case ~size:Test.Large "gateway: bearer auth on /v1, /api, /mcp, /ws" test_gateway_bearer_auth;
     case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 404" test_gateway_loopback_guards;
     case ~size:Test.Large "gateway: decisions.jsonl survives a restart" test_gateway_decisions_survive_restart;
+    case ~size:Test.Large "gateway: streaming usage chunk feeds the ledger" test_gateway_stream_usage_recorded;
     case "audit: secret redaction and hash8" test_redact_secrets;
     case ~size:Test.Large "gateway: audit log and errors carry no content or keys" test_gateway_audit_has_no_content_or_keys;
     case "agent: workdir resolution against allowed_workdirs" test_agent_resolve_workdir;
