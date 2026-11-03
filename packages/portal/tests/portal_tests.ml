@@ -2299,6 +2299,163 @@ let test_h8_session_pin_migrates = fun _ctx ->
           Ok ())
     ()
 
+(* ---------- spec 0.3 §2.3–2.4: unknown prices, agent latency, quota parking ---------- *)
+
+let test_router_unknown_price_is_neutral = fun _ctx ->
+  let kb =
+    [
+      mk_kb_model ~in_p:100 ~out_p:200 "m-cheap";
+      mk_kb_model ~in_p:500 ~out_p:900 "m-pricey";
+      mk_kb_model ~in_p:0 ~out_p:0 "m-unknown";
+    ]
+  in
+  let config =
+    mk_config
+      ~accounts:
+        [
+          mk_account ~models:[ "m-unknown" ] "acc_unknown";
+          mk_account ~models:[ "m-pricey" ] "acc_pricey";
+          mk_account ~models:[ "m-cheap" ] "acc_cheap";
+        ]
+      ~kb
+      ~routes:[]
+      ~max_fallback:2
+  in
+  let lookups = mk_scored_lookups ~spent:(fun _ -> 0) ~day:(fun _ -> 0) ~snap:(fun _ -> mk_snap ()) in
+  let task = { Router.category = "general"; model = None; est_in_tokens = 100; est_out_tokens = 100 } in
+  let d = Router.route_scored config lookups ~goal:Router.Cheapest task in
+  Test.assert_equal ~expected:(Some "acc_cheap") ~actual:d.Router.chosen;
+  Test.assert_equal ~expected:[ "acc_cheap"; "acc_unknown"; "acc_pricey" ] ~actual:(List.map d.Router.scores ~fn:(fun (n, _) -> n));
+  Test.assert_equal ~expected:[ "acc_unknown" ] ~actual:d.Router.unpriced;
+  let j = Json.to_string (Router.decision_json d) in
+  Test.assert_equal ~expected:true ~actual:(String.contains j "\"price_known\":false");
+  Test.assert_equal ~expected:true ~actual:(String.contains j "\"schema\":2");
+  Test.assert_equal ~expected:true ~actual:(Router.cost_routing_effective config);
+  Test.assert_equal
+    ~expected:false
+    ~actual:(Router.cost_routing_effective { config with Config.kb = [ mk_kb_model "m-cheap"; mk_kb_model ~in_p:0 ~out_p:0 "m-unknown" ] });
+  Ok ()
+
+let test_router_agent_latency_scale = fun _ctx ->
+  Test.assert_equal ~expected:100 ~actual:(Router.latency_score_agent ~ema_ms:0);
+  Test.assert_equal ~expected:85 ~actual:(Router.latency_score_agent ~ema_ms:30_000);
+  Test.assert_equal ~expected:40 ~actual:(Router.latency_score_agent ~ema_ms:120_000);
+  Test.assert_equal ~expected:0 ~actual:(Router.latency_score_agent ~ema_ms:600_000);
+  Test.assert_equal ~expected:0 ~actual:(Router.latency_score ~ema_ms:30_000);
+  Ok ()
+
+let test_signals_classify_error = fun _ctx ->
+  let c ?(codes = []) status body =
+    Signals.error_class_to_string (Signals.classify_error ~status ~body ~quota_codes:codes)
+  in
+  Test.assert_equal ~expected:"quota" ~actual:(c (Some 402) "");
+  Test.assert_equal ~expected:"quota" ~actual:(c (Some 429) "{\"error\":{\"code\":\"1113\",\"message\":\"余额不足\"}}");
+  Test.assert_equal ~expected:"quota" ~actual:(c (Some 429) "{\"error\":{\"type\":\"Insufficient_Quota\"}}");
+  Test.assert_equal ~expected:"transient" ~actual:(c (Some 429) "{\"error\":\"rate limited\"}");
+  Test.assert_equal ~expected:"quota" ~actual:(c ~codes:[ "E_TOKENS_GONE" ] (Some 429) "E_TOKENS_GONE");
+  Test.assert_equal ~expected:"client_auth" ~actual:(c (Some 401) "");
+  Test.assert_equal ~expected:"client_auth" ~actual:(c (Some 403) "");
+  Test.assert_equal ~expected:"client" ~actual:(c (Some 400) "");
+  Test.assert_equal ~expected:"client" ~actual:(c (Some 413) "");
+  Test.assert_equal ~expected:"transient" ~actual:(c (Some 503) "quota");
+  Test.assert_equal ~expected:"transient" ~actual:(c None "");
+  Ok ()
+
+let test_signals_quota_reset_at = fun _ctx ->
+  let day = 86_400_000 in
+  let d_2026_11_03 = Signals.days_of_civil ~y:2026 ~m:11 ~d:3 in
+  let noon = (d_2026_11_03 * day) + (day / 2) in
+  Test.assert_equal ~expected:(2026, 11, 3) ~actual:(Signals.civil_of_days d_2026_11_03);
+  Test.assert_equal ~expected:((d_2026_11_03 + 1) * day) ~actual:(Signals.quota_reset_at ~now_ms:noon ~reset:"daily");
+  Test.assert_equal
+    ~expected:(Signals.days_of_civil ~y:2026 ~m:12 ~d:1 * day)
+    ~actual:(Signals.quota_reset_at ~now_ms:noon ~reset:"monthly");
+  let dec = (Signals.days_of_civil ~y:2026 ~m:12 ~d:31 * day) + 1 in
+  Test.assert_equal
+    ~expected:(Signals.days_of_civil ~y:2027 ~m:1 ~d:1 * day)
+    ~actual:(Signals.quota_reset_at ~now_ms:dec ~reset:"monthly");
+  Test.assert_equal ~expected:(2024, 2, 29) ~actual:(Signals.civil_of_days (Signals.days_of_civil ~y:2024 ~m:2 ~d:29));
+  Test.assert_equal ~expected:(1970, 1, 1) ~actual:(Signals.civil_of_days 0);
+  Ok ()
+
+let unique_dir = fun prefix -> "./.oasis-test-data/" ^ prefix ^ "-" ^ Int.to_string (Signals.now_ms ())
+
+let test_signals_parked_roundtrip = fun _ctx ->
+  let dir = unique_dir "parked" in
+  let _ = Fs.create_dir_all (Path.from_string dir |> Result.unwrap) in
+  let path = dir ^ "/parked.json" in
+  let now = Signals.now_ms () in
+  let t = Signals.init () in
+  let _ = Signals.update t "acc_q" ~fn:(fun s -> Signals.record_quota s ~error:"quota" ~until_ms:(now + 60_000)) in
+  let _ = Signals.update t "acc_expired" ~fn:(fun s -> Signals.record_quota s ~error:"quota" ~until_ms:(now - 1)) in
+  let _ = Signals.update t "acc_ok" ~fn:(fun s -> s) in
+  Signals.save_parked t ~path;
+  let t2 = Signals.init () in
+  Signals.load_parked t2 ~path;
+  Test.assert_equal ~expected:true ~actual:(Signals.is_parked (Signals.snapshot t2 "acc_q") now);
+  Test.assert_equal ~expected:(now + 60_000) ~actual:(Signals.snapshot t2 "acc_q").Signals.parked_until_ms;
+  Test.assert_equal ~expected:false ~actual:(Signals.is_parked (Signals.snapshot t2 "acc_expired") now);
+  Test.assert_equal ~expected:false ~actual:(Signals.is_parked (Signals.snapshot t2 "acc_ok") now);
+  Ok ()
+
+let quota_account_json = fun body name ->
+  Json.from_string body |> Result.to_option
+  |> Option.and_then ~fn:(Json.get_field "accounts")
+  |> Option.and_then ~fn:Json.get_array
+  |> Option.unwrap_or ~default:[]
+  |> List.find ~fn:(fun a -> String.equal (h_field_str a "name") name)
+
+let test_gateway_quota_parks_across_restart = fun _ctx ->
+  match start_mocks 2 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let base = handoff_config mocks in
+      let config = { base with Config.data_dir = unique_dir "quota" } in
+      Mock.set_scenario (nth_mock mocks 0)
+        { (Mock.default_scenario) with status = 429; body = "{\"error\":{\"code\":\"1113\",\"message\":\"余额不足\"}}" };
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with body = openai_ok_body ~content:"from-b" };
+      let post ~port =
+        gw_post ~port ~path:"/v1/chat/completions"
+          ~headers:[ ("X-Oasis-Category", "general"); ("Content-Type", "application/json") ]
+          ~body:"{\"model\":\"m-x\",\"messages\":[{\"role\":\"user\",\"content\":\"q\"}]}"
+      in
+      let parked_reason ~port =
+        match gw_get ~port ~path:"/api/decisions" with
+        | Error _ -> false
+        | Ok (_, body) -> String.contains body "\"reason\":\"quota_parked\""
+      in
+      let parked_in_accounts ~port =
+        match gw_get ~port ~path:"/api/accounts" with
+        | Error _ -> false
+        | Ok (_, body) -> (
+            match quota_account_json body (acc_name 0) with
+            | None -> false
+            | Some a -> h_field_int a "parked_until_ms" > Signals.now_ms ()
+          )
+      in
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          match post ~port:gw.port with
+          | Error e -> Error e
+          | Ok (_, body1) -> (
+              Test.assert_equal ~expected:true ~actual:(String.contains body1 "from-b");
+              Test.assert_equal ~expected:true ~actual:(parked_in_accounts ~port:gw.port);
+              match post ~port:gw.port with
+              | Error e -> Error e
+              | Ok (_, body2) -> (
+                  Test.assert_equal ~expected:true ~actual:(String.contains body2 "from-b");
+                  Test.assert_equal ~expected:true ~actual:(parked_reason ~port:gw.port);
+                  match Gateway.start ~config_path:None ~config ~port:0 () with
+                  | Error e -> Error ("gateway restart: " ^ e)
+                  | Ok gw2 ->
+                      Test.assert_equal ~expected:true ~actual:(parked_in_accounts ~port:gw2.port);
+                      Ok ()
+                )
+            )
+        )
+    )
+
 let tests =
   Test.[
     case "chunked decoding: single chunk" test_chunked_single_chunk;
@@ -2366,6 +2523,12 @@ let tests =
     case ~size:Test.Large "H6: handoff limit ends with an SSE error (G0)" test_h6_handoff_limit;
     case ~size:Test.Large "H7: tools requests never splice a prefix (G3)" test_h7_tools_request_restarts;
     case ~size:Test.Large "H8: session pin migrates to the fallback" test_h8_session_pin_migrates;
+    case "router: unknown price is neutral and reported" test_router_unknown_price_is_neutral;
+    case "router: agent latency scale" test_router_agent_latency_scale;
+    case "signals: failure classification" test_signals_classify_error;
+    case "signals: quota reset dates" test_signals_quota_reset_at;
+    case "signals: parked persistence roundtrip" test_signals_parked_roundtrip;
+    case ~size:Test.Large "gateway: quota 429 parks the account across restarts" test_gateway_quota_parks_across_restart;
           ]
 
 let main ~args =

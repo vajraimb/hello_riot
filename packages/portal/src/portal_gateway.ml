@@ -2158,9 +2158,26 @@ let handle_list_accounts = fun (state : state) (ctx : Trail.ctx) ->
             ("in_flight", Json.int s.Portal_signals.in_flight);
             ("breaker", Json.string breaker_str);
             ("requests_in_window", Json.int s.Portal_signals.requests_in_window);
+            (
+              "parked_until_ms",
+              if Portal_signals.is_parked s (Portal_signals.now_ms ()) then Json.int s.Portal_signals.parked_until_ms
+              else Json.null
+            );
+            ("auth_invalid", Json.bool s.Portal_signals.auth_invalid);
+            ("supports_prefill", Json.bool a.Portal_config.supports_prefill);
+            (
+              "last_error",
+              match s.Portal_signals.last_error with Some e -> Json.string e | None -> Json.null
+            );
           ])
   in
-  Trail.json ctx (Json.obj [ ("accounts", Json.array accounts) ])
+  Trail.json
+    ctx
+    (Json.obj
+      [
+        ("accounts", Json.array accounts);
+        ("cost_routing_effective", Json.bool (Portal_router.cost_routing_effective config));
+      ])
 
 let handle_list_decisions = fun (state : state) (ctx : Trail.ctx) ->
   let ds = recent_decisions state in
@@ -3384,6 +3401,13 @@ let start = fun ~config_path ?(config : Portal_config.t option) ~port () ->
         }
       in
       let _ = Portal_inbox.load state.inbox in
+      Portal_signals.load_parked state.signals ~path:(parked_file state);
+      if
+        String.equal config.Portal_config.policy.Portal_config.goal "cheapest"
+        && not (Portal_router.cost_routing_effective config)
+      then
+        eprintln
+          "[oasis] WARN: policy.goal = \"cheapest\" but fewer than two [[models]] have prices; cost routing is ineffective";
       let _ =
         Portal_agent_worker.start
           ~agents:config.Portal_config.agents
