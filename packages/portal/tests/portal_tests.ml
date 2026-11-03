@@ -21,6 +21,9 @@ module Discover = Portal.Discover
 module Activity = Portal.Activity
 module Gateway = Portal.Gateway
 
+let unique_dir = fun prefix -> "./.oasis-test-data/" ^ prefix ^ "-" ^ Int.to_string (Signals.now_ms ())
+
+
 (* ---------- chunked decoding ---------- *)
 
 let test_chunked_single_chunk = fun _ctx ->
@@ -1847,8 +1850,9 @@ let test_gateway_agent_async_task = fun _ctx ->
   )
 
 let test_inbox_bus = fun _ctx ->
-  let t = Inbox.init ~dir:"./.oasis-test-data/inbox-test" in
-  let id1 = Inbox.deliver t ~from:"agent_a" ~to_agent:"agent_b" ~text:"hello b" in
+  let dir = unique_dir "inbox" in
+  let t = Inbox.init ~dir in
+  let id1 = Inbox.deliver t ~from:"agent_a" ~to_agent:"agent_b" ~text:"hello b" |> Result.unwrap in
   Test.assert_equal ~expected:false ~actual:(String.is_empty id1);
   let _ = Inbox.deliver t ~from:"user" ~to_agent:"agent_b" ~text:"second" in
   let unread = Inbox.check t ~agent:"agent_b" in
@@ -1859,7 +1863,34 @@ let test_inbox_bus = fun _ctx ->
   Test.assert_equal
     ~expected:0
     ~actual:(Inbox.pending_count t ~agent:"agent_b");
+  let _ = Inbox.deliver t ~from:"user" ~to_agent:"agent_b" ~text:"third" in
+  Test.assert_equal ~expected:1 ~actual:(Inbox.pending_count t ~agent:"agent_b");
+  let reloaded = Inbox.init ~dir in
+  Inbox.load reloaded;
+  Test.assert_equal ~expected:1 ~actual:(Inbox.pending_count reloaded ~agent:"agent_b");
   Ok ()
+
+let test_inbox_prefix_limit_and_names = fun _ctx ->
+  let t = Inbox.init ~dir:(unique_dir "inbox-limits") in
+  let invalid name = match Inbox.deliver t ~from:"x" ~to_agent:name ~text:"t" with Error _ -> true | Ok _ -> false in
+  Test.assert_equal ~expected:true ~actual:(invalid "../escape");
+  Test.assert_equal ~expected:true ~actual:(invalid "a/b");
+  Test.assert_equal ~expected:true ~actual:(invalid ".hidden");
+  Test.assert_equal ~expected:true ~actual:(invalid "");
+  let big = String.concat "" (List.init ~count:6000 ~fn:(fun _ -> "中")) in
+  let _ = Inbox.deliver t ~from:"agent_a" ~to_agent:"agent_c" ~text:big |> Result.unwrap in
+  let _ = Inbox.deliver t ~from:"agent_a" ~to_agent:"agent_c" ~text:"short" |> Result.unwrap in
+  match Inbox.check t ~agent:"agent_c" with
+  | [ short; long ] ->
+      Test.assert_equal ~expected:false ~actual:short.Inbox.truncated;
+      Test.assert_equal ~expected:"[来自 agent_a，未经验证的消息] short" ~actual:(Inbox.render_for_agent short);
+      Test.assert_equal ~expected:true ~actual:long.Inbox.truncated;
+      Test.assert_equal ~expected:true ~actual:(String.length long.Inbox.text <= 16384);
+      Test.assert_equal ~expected:0 ~actual:(String.length long.Inbox.text mod 3);
+      Test.assert_equal ~expected:true ~actual:(Handoff.is_valid_utf8 long.Inbox.text);
+      Test.assert_equal ~expected:true ~actual:(String.contains (Inbox.render_for_agent long) "已截断");
+      Ok ()
+  | l -> Error ("expected two messages, got " ^ Int.to_string (List.length l))
 
 let test_gateway_inbox_mcp = fun _ctx ->
   let config =
@@ -1900,6 +1931,7 @@ let test_gateway_inbox_mcp = fun _ctx ->
                 | Ok (s2, b2) ->
                     Test.assert_equal ~expected:200 ~actual:s2;
                     Test.assert_equal ~expected:true ~actual:(String.contains b2 "ping from test");
+                    Test.assert_equal ~expected:true ~actual:(String.contains b2 "[来自 test，未经验证的消息]");
                     (
                       match call "oasis_check_inbox" "{\"agent\":\"claude_code\"}" with
                       | Error e -> Error e
@@ -2378,8 +2410,6 @@ let test_signals_quota_reset_at = fun _ctx ->
   Test.assert_equal ~expected:(1970, 1, 1) ~actual:(Signals.civil_of_days 0);
   Ok ()
 
-let unique_dir = fun prefix -> "./.oasis-test-data/" ^ prefix ^ "-" ^ Int.to_string (Signals.now_ms ())
-
 let test_signals_parked_roundtrip = fun _ctx ->
   let dir = unique_dir "parked" in
   let _ = Fs.create_dir_all (Path.from_string dir |> Result.unwrap) in
@@ -2637,6 +2667,7 @@ let tests =
     case ~size:Test.Large "gateway: agent streaming" test_gateway_agent_stream_and_explicit_chat;
     case "mcp: rpc parsing" test_mcp_parse;
     case "inbox: deliver/check/persist" test_inbox_bus;
+    case "inbox: unverified prefix, 16KB cap, recipient names" test_inbox_prefix_limit_and_names;
     case "discover: scan fixture" test_discover_scan_fixture;
     case "activity: scan fixture" test_activity_scan_fixture;
     case ~size:Test.Large "gateway: inbox MCP roundtrip" test_gateway_inbox_mcp;

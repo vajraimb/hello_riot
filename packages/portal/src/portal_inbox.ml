@@ -12,6 +12,7 @@ type entry = {
   text: string;
   ts_ms: int;
   read: bool;
+  truncated: bool;
 }
 
 type t = {
@@ -37,54 +38,106 @@ let now_ms = fun () ->
      ordering key and store real wall-clock-ish ordering via seq *)
   Portal_signals.now_ms ()
 
-(** Persist one message line to the agent's jsonl file (append-only). *)
-let persist = fun (t : t) ~(e : entry) ->
-  let path = t.dir ^ "/" ^ e.to_agent ^ ".jsonl" in
-  let line =
-    Std.Data.Json.to_string
-      (Std.Data.Json.obj
-        [
-          ("id", Std.Data.Json.string e.id);
-          ("from", Std.Data.Json.string e.from);
-          ("to", Std.Data.Json.string e.to_agent);
-          ("text", Std.Data.Json.string e.text);
-          ("ts_ms", Std.Data.Json.int e.ts_ms);
-          ("read", Std.Data.Json.bool e.read);
-        ])
-    ^ "\n"
+module Json = Std.Data.Json
+
+(** Inbox texts are capped so one agent can't flood another's context. *)
+let max_text_bytes = 16 * 1024
+
+(** Agent names become file names under [dir]. *)
+let valid_name = fun name ->
+  let ok_char c =
+    match c with
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | '.' -> true
+    | _ -> false
   in
+  if String.is_empty name then false
+  else if String.length name > 64 then false
+  else if String.starts_with ~prefix:"." name then false
+  else
+    let rec all i = if i >= String.length name then true else if ok_char (String.get_unchecked name ~at:i) then all (i + 1) else false in
+    all 0
+
+(** Longest prefix of [s] of at most [max] bytes that doesn't split a UTF-8
+    sequence. *)
+let utf8_truncate = fun s ~max ->
+  if String.length s <= max then s
+  else
+    let is_cont i = Char.code (String.get_unchecked s ~at:i) land 0xC0 = 0x80 in
+    let rec back i = if i > 0 then if is_cont i then back (i - 1) else i else 0 in
+    String.sub s ~offset:0 ~len:(back max)
+
+(** What an agent sees when it reads its inbox: the sender is asserted by
+    whoever called [oasis_send_message], so it is labelled as unverified. *)
+let render_for_agent = fun (e : entry) ->
+  "[来自 " ^ e.from ^ "，未经验证的消息] " ^ e.text
+  ^ if e.truncated then "\n[Oasis: 消息超过 16KB，已截断]" else ""
+
+let append_line = fun (t : t) ~agent line ->
+  let path = t.dir ^ "/" ^ agent ^ ".jsonl" in
   match Fs.File.open_append (Path.from_string path |> Result.unwrap) with
   | Ok file -> (
-      match Fs.File.write_all file line with
+      match Fs.File.write_all file (line ^ "\n") with
       | Ok () -> (match Fs.File.close file with _ -> ())
       | Error _ -> ()
     )
   | Error _ -> ()
 
-(** Deliver a message into [to_agent]'s inbox. *)
-let deliver = fun (t : t) ~from ~to_agent ~text ->
-  let e = { id = new_id (); from; to_agent; text; ts_ms = now_ms (); read = false } in
-  let _ =
-    ConcurrentHashMap.insert
-      t.boxes
-      ~key:to_agent
-      ~value:(e :: (ConcurrentHashMap.get t.boxes ~key:to_agent |> Option.unwrap_or ~default:[]))
-  in
-  persist t ~e;
-  e.id
+(** Persist one message line to the agent's jsonl file (append-only). *)
+let persist = fun (t : t) ~(e : entry) ->
+  append_line t ~agent:e.to_agent
+    (Json.to_string
+      (Json.obj
+        [
+          ("id", Json.string e.id);
+          ("from", Json.string e.from);
+          ("to", Json.string e.to_agent);
+          ("text", Json.string e.text);
+          ("ts_ms", Json.int e.ts_ms);
+          ("read", Json.bool e.read);
+          ("truncated", Json.bool e.truncated);
+        ]))
 
-(** Read (and mark read) all messages for an agent, newest first. *)
+(** Deliver a message into [to_agent]'s inbox; returns the message id. *)
+let deliver = fun (t : t) ~from ~to_agent ~text ->
+  if not (valid_name to_agent) then Error ("invalid recipient name: " ^ to_agent)
+  else
+    let kept = utf8_truncate text ~max:max_text_bytes in
+    let e =
+      {
+        id = new_id ();
+        from;
+        to_agent;
+        text = kept;
+        ts_ms = now_ms ();
+        read = false;
+        truncated = String.length kept < String.length text;
+      }
+    in
+    let _ =
+      ConcurrentHashMap.insert
+        t.boxes
+        ~key:to_agent
+        ~value:(e :: (ConcurrentHashMap.get t.boxes ~key:to_agent |> Option.unwrap_or ~default:[]))
+    in
+    persist t ~e;
+    Ok e.id
+
+(** Read (and mark read) all messages for an agent, newest first. Read marks
+    are appended as [{"read_at", "id"}] lines and replayed by [load]. *)
 let check = fun (t : t) ~agent ->
   let entries =
     ConcurrentHashMap.get t.boxes ~key:agent |> Option.unwrap_or ~default:[]
   in
   let unread = List.filter entries ~fn:(fun e -> not e.read) in
-  (* mark read in memory (persistence is append-only; a full rewrite on
-     check would be overkill for a personal portal) *)
   let all =
     List.map entries ~fn:(fun e -> if e.read then e else { e with read = true })
   in
   let _ = ConcurrentHashMap.insert t.boxes ~key:agent ~value:all in
+  if valid_name agent then (
+    let at = now_ms () in
+    List.for_each unread ~fn:(fun e ->
+      append_line t ~agent (Json.to_string (Json.obj [ ("id", Json.string e.id); ("read_at", Json.int at) ])))
+  );
   unread
 
 let pending_count = fun (t : t) ~agent ->
@@ -105,12 +158,21 @@ let load = fun (t : t) ->
           | Error _ -> ()
           | Ok content ->
               let lines = String.split ~by:"\n" content in
+              let read_ids =
+                List.filter_map lines ~fn:(fun line ->
+                  match Json.from_string line with
+                  | Ok j when Option.is_some (Json.get_field "read_at" j) ->
+                      Json.get_field "id" j |> Option.and_then ~fn:Json.get_string
+                  | _ -> None)
+              in
+              let was_read id = List.any read_ids ~fn:(String.equal id) in
               let parsed =
                 List.filter_map lines ~fn:(fun line ->
                   if String.is_empty line then None
                   else
                     match Std.Data.Json.from_string line with
                     | Error _ -> None
+                    | Ok j when Option.is_some (Json.get_field "read_at" j) -> None
                     | Ok j ->
                         let get_str k =
                           Std.Data.Json.get_field k j
@@ -134,7 +196,8 @@ let load = fun (t : t) ->
                             to_agent = get_str "to";
                             text = get_str "text";
                             ts_ms = get_int "ts_ms";
-                            read = get_bool "read";
+                            read = get_bool "read" || was_read (get_str "id");
+                            truncated = get_bool "truncated";
                           })
                 |> List.rev
               in

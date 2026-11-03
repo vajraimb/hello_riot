@@ -2693,10 +2693,12 @@ let mcp_tool_send_message = fun (state : state) (params : Json.t) ->
       let from =
         mcp_get_str params "from" |> Option.unwrap_or ~default:"mcp-client"
       in
-      let id = Portal_inbox.deliver state.inbox ~from ~to_agent ~text in
-      Ok
-        ("delivered to " ^ to_agent ^ " (message id: " ^ id
-        ^ "). The recipient reads it with oasis_check_inbox.")
+      match Portal_inbox.deliver state.inbox ~from ~to_agent ~text with
+      | Error e -> Error e
+      | Ok id ->
+          Ok
+            ("delivered to " ^ to_agent ^ " (message id: " ^ id
+            ^ "). The recipient reads it with oasis_check_inbox.")
 let mcp_tool_check_inbox = fun (state : state) (params : Json.t) ->
   match mcp_get_str params "agent" with
   | None -> Error "missing required parameter: agent"
@@ -2706,17 +2708,17 @@ let mcp_tool_check_inbox = fun (state : state) (params : Json.t) ->
         Ok ("no unread messages for " ^ agent)
       else
         Ok
-          (List.map msgs ~fn:(fun e ->
-            "[" ^ e.Portal_inbox.from ^ " -> " ^ e.Portal_inbox.to_agent ^ "] " ^ e.Portal_inbox.text)
-          |> String.concat "\n---\n")
+          (List.map msgs ~fn:Portal_inbox.render_for_agent |> String.concat "\n---\n")
 let mcp_tool_ask_user = fun (state : state) (params : Json.t) ->
   match (mcp_get_str params "from_agent", mcp_get_str params "question") with
   | (None, _) -> Error "missing required parameter: from_agent"
   | (_, None) -> Error "missing required parameter: question"
   | (Some from_agent, Some question) ->
-      let _ = Portal_inbox.deliver state.inbox ~from:from_agent ~to_agent:"user" ~text:question in
       (* answer channel: the user replies via /api/inbox/reply which delivers
          back to the asking agent's inbox *)
+      match Portal_inbox.deliver state.inbox ~from:from_agent ~to_agent:"user" ~text:question with
+      | Error e -> Error e
+      | Ok _ ->
       Ok
         ("question delivered to the user (asked by " ^ from_agent
         ^ "). The answer will arrive in your inbox: check oasis_check_inbox with agent=" ^ from_agent ^ ".")
@@ -2807,8 +2809,11 @@ let handle_inbox_reply = fun (state : state) (ctx : Trail.ctx) ->
       Json.get_field "text" body |> Option.and_then ~fn:Json.get_string )
   with
   | (Some to_agent, Some text) ->
-      let id = Portal_inbox.deliver state.inbox ~from:"user" ~to_agent ~text in
-      Trail.json ctx (Json.obj [ ("delivered", Json.string id) ])
+      (
+        match Portal_inbox.deliver state.inbox ~from:"user" ~to_agent ~text with
+        | Ok id -> Trail.json ctx (Json.obj [ ("delivered", Json.string id) ])
+        | Error e -> Trail.json ~status:Net.Http.Status.BadRequest ctx (Json.obj [ ("error", Json.string e) ])
+      )
   | _ ->
       Trail.json
         ~status:Net.Http.Status.BadRequest
