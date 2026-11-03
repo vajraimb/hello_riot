@@ -2455,6 +2455,17 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
       in
       let mode = mcp_get_str params "mode" |> Option.unwrap_or ~default:"async" in
       let timeout_override = mcp_get_int params "timeout_s" in
+      let requested_workdir = mcp_get_str params "workdir" in
+      let with_overrides (agent : Portal_agent.agent) =
+        match Portal_agent.resolve_workdir agent requested_workdir with
+        | Error e -> Error e
+        | Ok workdir ->
+            let agent = { agent with Portal_agent.workdir } in
+            Ok
+              (match timeout_override with
+               | Some t -> { agent with Portal_agent.timeout_s = t }
+               | None -> agent)
+      in
       let decision = route_agents state config category None in
       let forced = mcp_get_str params "agent" in
       let candidates =
@@ -2505,12 +2516,21 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                      }
                     :: acc)
                     rest
-              | Some agent ->
-                  let agent =
-                    match timeout_override with
-                    | Some t -> { agent with Portal_agent.timeout_s = t }
-                    | None -> agent
-                  in
+              | Some agent0 -> (
+                  match with_overrides agent0 with
+                  | Error e ->
+                      run_sync
+                        ({
+                           Portal_router.account = nm;
+                           model = nm;
+                           status = None;
+                           error = Some e;
+                           latency_ms = 0;
+                           cost_nano = 0;
+                         }
+                        :: acc)
+                        rest
+                  | Ok agent ->
                   let model_for =
                     List.head agent.Portal_agent.models
                     |> Option.unwrap_or ~default:""
@@ -2568,6 +2588,7 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                           :: acc)
                           rest
                   )
+                )
             )
         in
         if String.equal mode "sync" then
@@ -2579,11 +2600,9 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
             match find_agent config nm with
             | None -> Error "no_agent_available"
             | Some agent0 ->
-                let agent =
-                  match timeout_override with
-                  | Some t -> { agent0 with Portal_agent.timeout_s = t }
-                  | None -> agent0
-                in
+                match with_overrides agent0 with
+                | Error e -> Error e
+                | Ok agent ->
                 let task_id = Portal_task.new_id () in
                 let _ = Portal_task.insert state.tasks ~task_id in
                 let model_for =

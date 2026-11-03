@@ -2528,6 +2528,69 @@ let test_gateway_loopback_guards = fun _ctx ->
           Ok ()
     )
 
+(* ---------- spec 0.3 §5.2: workdir / env whitelist ---------- *)
+
+let test_agent_resolve_workdir = fun _ctx ->
+  let a = { (mk_agent "wd") with Agent.workdir = "/home/u/proj"; allowed_workdirs = [ "/home/u/proj"; "/srv/repos/" ] } in
+  let r p = Agent.resolve_workdir a p in
+  Test.assert_equal ~expected:(Ok "/home/u/proj") ~actual:(r None);
+  Test.assert_equal ~expected:(Ok "/home/u/proj") ~actual:(r (Some "/home/u/proj/"));
+  Test.assert_equal ~expected:(Ok "/home/u/proj/sub/dir") ~actual:(r (Some "/home/u/proj//sub/./dir"));
+  Test.assert_equal ~expected:(Ok "/srv/repos/x") ~actual:(r (Some "/srv/repos/x"));
+  let rejected p = match r (Some p) with Error _ -> true | Ok _ -> false in
+  Test.assert_equal ~expected:true ~actual:(rejected "/home/u/proj/../other");
+  Test.assert_equal ~expected:true ~actual:(rejected "/home/u/project2");
+  Test.assert_equal ~expected:true ~actual:(rejected "relative/path");
+  Test.assert_equal ~expected:true ~actual:(rejected "/etc");
+  let only_default = { (mk_agent "wd2") with Agent.workdir = "/home/u/proj" } in
+  Test.assert_equal ~expected:(Ok "/home/u/proj/a") ~actual:(Agent.resolve_workdir only_default (Some "/home/u/proj/a"));
+  Test.assert_equal
+    ~expected:true
+    ~actual:(match Agent.resolve_workdir only_default (Some "/tmp") with Error _ -> true | Ok _ -> false);
+  let unconfigured = mk_agent "wd3" in
+  Test.assert_equal
+    ~expected:true
+    ~actual:(match Agent.resolve_workdir unconfigured (Some "/tmp") with Error _ -> true | Ok _ -> false);
+  Ok ()
+
+let test_agent_env_whitelist = fun _ctx ->
+  let cwd = Env.current_dir () |> Result.unwrap |> Path.to_string in
+  let script = cwd ^ "/packages/portal/tests/fixtures/agent_env.sh" in
+  let _ = Env.set ~var:"DEEPSEEK_API_KEY" ~value:"sk-must-not-leak" in
+  let _ = Env.set ~var:"OASIS_PASS_TEST" ~value:"passed-through" in
+  let a =
+    {
+      (mk_agent ~args:[ script ] ~home:"/custom/home" "agent_env") with
+      Agent.workdir = "/tmp";
+      env_passthrough = [ "OASIS_PASS_TEST" ];
+    }
+  in
+  let me = self () in
+  let _ =
+    Runtime.spawn_blocked (fun () ->
+      let res = Agent.collect ~agent:a ~model:"" ~prompt:"" () in
+      send me (Agent_collect_done res);
+      Ok ())
+  in
+  let selector msg =
+    match msg with
+    | Agent_collect_done r -> Select r
+    | _ -> Skip
+  in
+  let result = receive ~selector ~timeout:(Time.Duration.from_secs 30) () in
+  let _ = Env.remove ~var:"DEEPSEEK_API_KEY" in
+  let _ = Env.remove ~var:"OASIS_PASS_TEST" in
+  match result with
+  | Ok txt ->
+      Test.assert_equal ~expected:true ~actual:(String.contains txt "HOME=/custom/home");
+      Test.assert_equal ~expected:true ~actual:(String.contains txt "KEY=unset");
+      Test.assert_equal ~expected:true ~actual:(String.contains txt "PASS=passed-through");
+      Test.assert_equal ~expected:true ~actual:(String.contains txt "PATHSET=yes");
+      Test.assert_equal ~expected:true ~actual:(String.contains txt "PWD=/tmp");
+      Ok ()
+  | Error e -> Error ("collect failed: " ^ e)
+  | exception Receive_timeout -> Error "collect timeout"
+
 let tests =
   Test.[
     case "chunked decoding: single chunk" test_chunked_single_chunk;
@@ -2603,6 +2666,8 @@ let tests =
     case ~size:Test.Large "gateway: quota 429 parks the account across restarts" test_gateway_quota_parks_across_restart;
     case ~size:Test.Large "gateway: bearer auth on /v1, /api, /mcp, /ws" test_gateway_bearer_auth;
     case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 404" test_gateway_loopback_guards;
+    case "agent: workdir resolution against allowed_workdirs" test_agent_resolve_workdir;
+    case ~size:Test.Large "agent: env whitelist hides API keys" test_agent_env_whitelist;
           ]
 
 let main ~args =

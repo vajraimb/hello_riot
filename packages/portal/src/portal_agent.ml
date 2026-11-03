@@ -103,8 +103,70 @@ let extract_text = fun ~command (line : string) ->
     if String.is_empty (String.trim line) then None
     else Some (line ^ "\n")
 
+(* ---------- workdir / env sandboxing (spec §5.2) ---------- *)
+
+(** Absolute, [..]-free path with empty and [.] segments removed and no
+    trailing slash ("/" stays "/"). *)
+let normalize_abs_path = fun path ->
+  if not (String.starts_with ~prefix:"/" path) then Error ("workdir must be absolute: " ^ path)
+  else
+    let segments =
+      String.split ~by:"/" path
+      |> List.filter ~fn:(fun s -> not (String.is_empty s || String.equal s "."))
+    in
+    if List.any segments ~fn:(String.equal "..") then Error ("workdir must not contain '..': " ^ path)
+    else Ok ("/" ^ String.concat "/" segments)
+
+let path_within = fun ~root path ->
+  if String.equal root "/" then true
+  else if String.equal path root then true
+  else String.starts_with ~prefix:(root ^ "/") path
+
+(** [resolve_workdir agent requested] is the directory the agent runs in.
+    A requested workdir must sit inside [allowed_workdirs] (or the agent's own
+    [workdir] when that list is empty); without a request the configured
+    [workdir] is used. *)
+let resolve_workdir = fun (a : agent) (requested : string option) ->
+  match requested with
+  | None -> Ok a.workdir
+  | Some req -> (
+      match normalize_abs_path req with
+      | Error e -> Error e
+      | Ok path ->
+          let roots =
+            (if List.is_empty a.allowed_workdirs then [ a.workdir ] else a.allowed_workdirs)
+            |> List.filter ~fn:(fun r -> not (String.is_empty r))
+            |> List.filter_map ~fn:(fun r -> normalize_abs_path r |> Result.to_option)
+          in
+          if List.any roots ~fn:(fun root -> path_within ~root path) then Ok path
+          else Error ("workdir not allowed for agent " ^ a.name ^ ": " ^ path)
+    )
+
+(** Variables a child agent inherits; everything else (API keys in
+    particular) is dropped. *)
+let base_env_keys = [ "PATH"; "LANG"; "LC_ALL"; "TERM"; "USER"; "LOGNAME"; "SHELL"; "TMPDIR" ]
+
+let child_env = fun (a : agent) ->
+  let inherited =
+    base_env_keys @ a.env_passthrough
+    |> List.filter ~fn:(fun k -> not (String.equal k "HOME"))
+    |> List.filter_map ~fn:(fun k ->
+      match Env.var Env.String ~name:k with
+      | Some v -> Some (k, v)
+      | None -> None)
+  in
+  let home =
+    if not (String.is_empty a.home) then Some a.home else Env.var Env.String ~name:"HOME"
+  in
+  match home with
+  | Some h -> ("HOME", h) :: inherited
+  | None -> inherited
+
 (* ---------- execution ---------- *)
 
+(** Runs [agent.command] under [env -i] so the child sees only
+    [child_env]: [Process.spawn ~env] would merge into the gateway's own
+    environment, which holds every upstream API key. *)
 let spawn_proc = fun ~(agent : agent) ~args () ->
   let stdio =
     {
@@ -117,11 +179,10 @@ let spawn_proc = fun ~(agent : agent) ~args () ->
     if String.is_empty agent.workdir then None
     else Some (Path.from_string agent.workdir |> Result.unwrap)
   in
-  let env =
-    if String.is_empty agent.home then None
-    else Some [| ("HOME", agent.home) |]
-  in
-  Process.spawn ~program:agent.command ~args ?env ?current_dir:workdir ~stdio ()
+  let env_args = List.map (child_env agent) ~fn:(fun (k, v) -> k ^ "=" ^ v) in
+  let argv = ("-i" :: env_args) @ (agent.command :: Array.to_list args) in
+  let args = Array.init ~count:(List.length argv) ~fn:(fun i -> List.get_unchecked argv ~at:i) in
+  Process.spawn ~program:"env" ~args ?current_dir:workdir ~stdio ()
 
 let watchdog = fun ~(proc : Process.t) ~timeout_s ~to_pid ~leg ->
   (* SIGKILL the subprocess after [timeout_s]; runs on its own blocking lane *)

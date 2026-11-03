@@ -139,6 +139,7 @@ let tools_list = fun () ->
                     ("agent", str_prop ~required:false ~description:"Force a specific agent by name (optional).");
                     ("mode", str_prop ~required:false ~description:"async (default, returns task_id immediately) or sync (waits, may exceed client timeouts).");
                     ("timeout_s", int_prop ~description:"Agent timeout in seconds (default from config).");
+                    ("workdir", str_prop ~required:false ~description:"Absolute directory to run the agent in; must be inside the agent's allowed_workdirs (default: the agent's configured workdir).");
                   ]
               );
               ("required", Json.array [ Json.string "prompt" ]);
