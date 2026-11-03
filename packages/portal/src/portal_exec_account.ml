@@ -22,7 +22,7 @@ type chat_sync_result = {
   cst_decision: Portal_router.decision;
 }
 
-let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decision : Portal_router.decision) ~(candidates : string list) ~(model : string option) ~(messages : Json.t) ~(max_tokens : int) ~(session : string option) ~(request_id : string) () ->
+let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decision : Portal_router.decision) ~(candidates : string list) ~(model : string option) ~(messages : Json.t) ~(max_tokens : int) ?(extra = []) ~(session : string option) ~(request_id : string) () ->
     let rec try_attempts acc = function
       | [] ->
           let decision' =
@@ -91,7 +91,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                       [ ("Authorization", "Bearer " ^ k) ]
                 | None -> []
               in
-              let upstream_body =
+              let req_body =
                 if anthropic then
                   Portal_anthropic.to_request
                     ~thinking:account.Portal_config.thinking
@@ -101,14 +101,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                     ~max_tokens
                     ~stream:false
                 else
-                  Json.obj
-                    [
-                      ("model", Json.string upstream_model);
-                      ("messages", messages);
-                      ("max_tokens", Json.int max_tokens);
-                      ("stream", Json.bool false);
-                    ]
-                  |> Json.to_string
+                  upstream_body ~extra ~model:upstream_model ~messages ~max_tokens ~stream:false ()
               in
               let (scheme, host, port_opt, path_prefix) =
                 parse_base_url account.Portal_config.base_url
@@ -134,7 +127,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                   ~port
                   ~path:chat_path
                   ~headers
-                  ~body:upstream_body
+                  ~body:req_body
               in
               (
                 match call_result with
@@ -395,6 +388,18 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
     | Some c -> c :: decision.Portal_router.fallback_order
     | None -> []
   in
+  let needs_openai = requires_openai_protocol body in
+  let routable = candidates in
+  let candidates =
+    if needs_openai then
+      List.filter candidates ~fn:(fun name ->
+        match Portal_config.find_account config name with
+        | Some a -> not (String.equal a.Portal_config.protocol "anthropic")
+        | None -> false)
+    else
+      candidates
+  in
+  let extra = passthrough_fields body in
   (* pin at dispatch (updated again on successful handoff) *)
   (
     match (session, List.head candidates) with
@@ -406,7 +411,22 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
           ~now_ms:(Portal_signals.now_ms ())
     | _ -> ()
   );
-  if List.is_empty candidates then (
+  if List.is_empty candidates && not (List.is_empty routable) then (
+    record_decision state decision;
+    Trail.json
+      ~status:Net.Http.Status.BadRequest
+      ctx
+      (Json.obj
+        [
+          ("error", Json.string "tools_require_openai_protocol_account");
+          (
+            "message",
+            Json.string
+              "tools / tool_choice / functions / response_format are only forwarded to protocol = \"openai\" accounts; none is routable for this request"
+          );
+          ("decision", Portal_router.decision_json decision);
+        ])
+  ) else if List.is_empty candidates then (
     record_decision state decision;
     Trail.json
       ~status:Net.Http.Status.PaymentRequired
@@ -432,6 +452,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
           session;
           request_id;
           handoff_allowed = handoff_applicable body;
+          extra;
         }
       in
       let _ =
@@ -461,6 +482,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
         ~model
         ~messages:(Json.get_field "messages" body |> Option.unwrap_or ~default:(Json.array []))
         ~max_tokens
+        ~extra
         ~session
         ~request_id
         ()

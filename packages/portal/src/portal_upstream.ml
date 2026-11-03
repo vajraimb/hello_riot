@@ -254,6 +254,39 @@ let extract_delta_content = fun (data : string) ->
             ""
     )
 
+(** True for an OpenAI stream event that carries tool-call deltas or ends a
+    tool-call turn; such events are relayed to the client verbatim. *)
+let is_tool_call_event = fun (data : string) ->
+  match Json.from_string data with
+  | Error _ -> false
+  | Ok j -> (
+      match
+        Json.get_field "choices" j
+        |> Option.and_then ~fn:Json.get_array
+        |> Option.and_then ~fn:List.head
+      with
+      | None -> false
+      | Some choice ->
+          let has_tool_delta =
+            match Json.get_field "delta" choice with
+            | None -> false
+            | Some delta -> (
+                let present k =
+                  match Json.get_field k delta with
+                  | None | Some Json.Null -> false
+                  | Some _ -> true
+                in
+                present "tool_calls" || present "function_call"
+              )
+          in
+          let tool_finish =
+            match Json.get_field "finish_reason" choice |> Option.and_then ~fn:Json.get_string with
+            | Some "tool_calls" | Some "function_call" -> true
+            | _ -> false
+          in
+          has_tool_delta || tool_finish
+    )
+
 let upstream_headers = fun (account : Portal_config.account) host ->
   let auth_headers =
     match Portal_config.api_key_of account with
@@ -268,7 +301,37 @@ let upstream_headers = fun (account : Portal_config.account) host ->
   :: ("Connection", "close")
   :: auth_headers
 
-let upstream_body = fun ?(stream_usage = false) ~model ~messages ~max_tokens ~stream () ->
+(** OpenAI request fields forwarded verbatim to OpenAI-protocol upstreams.
+    [n] is deliberately absent: the conductor relays a single choice. *)
+let passthrough_keys = [
+  "tools";
+  "tool_choice";
+  "parallel_tool_calls";
+  "functions";
+  "function_call";
+  "response_format";
+  "temperature";
+  "top_p";
+  "stop";
+  "seed";
+  "presence_penalty";
+  "frequency_penalty";
+  "user";
+]
+
+let passthrough_fields = fun (body : Json.t) ->
+  List.filter_map passthrough_keys ~fn:(fun k ->
+    match Json.get_field k body with
+    | Some v -> Some (k, v)
+    | None -> None)
+
+(** Tools and structured output have no Anthropic translation here, so such
+    requests may only be served by OpenAI-protocol accounts. *)
+let requires_openai_protocol = fun (body : Json.t) ->
+  let has k = Option.is_some (Json.get_field k body) in
+  has "tools" || has "tool_choice" || has "functions" || has "function_call" || has "response_format"
+
+let upstream_body = fun ?(stream_usage = false) ?(extra = []) ~model ~messages ~max_tokens ~stream () ->
   Json.obj
     ([
        ("model", Json.string model);
@@ -276,6 +339,7 @@ let upstream_body = fun ?(stream_usage = false) ~model ~messages ~max_tokens ~st
        ("max_tokens", Json.int max_tokens);
        ("stream", Json.bool stream);
      ]
+    @ extra
     @
     if stream && stream_usage then
       [ ("stream_options", Json.obj [ ("include_usage", Json.bool true) ]) ]

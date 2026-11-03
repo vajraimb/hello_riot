@@ -2338,6 +2338,179 @@ let test_h8_session_pin_migrates = fun _ctx ->
           Ok ())
     ()
 
+(* ---------- tools / structured-output passthrough ---------- *)
+
+let tool_call_chunk = fun ?(finish = false) delta ->
+  Json.to_string
+    (Json.obj
+      [
+        ("object", Json.string "chat.completion.chunk");
+        (
+          "choices",
+          Json.array
+            [
+              Json.obj
+                [
+                  ("index", Json.int 0);
+                  ("delta", delta);
+                  ("finish_reason", if finish then Json.string "tool_calls" else Json.null);
+                ];
+            ]
+        );
+      ])
+
+let tc_open =
+  tool_call_chunk
+    (Json.obj
+      [
+        (
+          "tool_calls",
+          Json.array
+            [
+              Json.obj
+                [
+                  ("index", Json.int 0);
+                  ("id", Json.string "call_1");
+                  ("type", Json.string "function");
+                  ("function", Json.obj [ ("name", Json.string "get_weather"); ("arguments", Json.string "") ]);
+                ];
+            ]
+        );
+      ])
+
+let tc_args =
+  tool_call_chunk
+    (Json.obj
+      [
+        (
+          "tool_calls",
+          Json.array
+            [ Json.obj [ ("index", Json.int 0); ("function", Json.obj [ ("arguments", Json.string "{\"city\":\"SH\"}") ]) ] ]
+        );
+      ])
+
+let tc_finish = tool_call_chunk ~finish:true (Json.obj [])
+
+let tools_extra =
+  [
+    (
+      "tools",
+      Json.array
+        [
+          Json.obj
+            [
+              ("type", Json.string "function");
+              ("function", Json.obj [ ("name", Json.string "get_weather"); ("parameters", Json.obj []) ]);
+            ];
+        ]
+    );
+    ("tool_choice", Json.string "auto");
+    ("temperature", Json.float 0.2);
+  ]
+
+let test_tools_sync_passthrough = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let tool_body =
+        "{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"SH\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":7}}"
+      in
+      Mock.set_scenario (nth_mock mocks 0) { (Mock.default_scenario) with body = tool_body };
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let body =
+            Json.to_string
+              (Json.obj
+                ([
+                   ("model", Json.string "m-x");
+                   ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "weather?") ] ]);
+                   ("max_tokens", Json.int 64);
+                 ]
+                @ tools_extra))
+          in
+          match
+            gw_post ~port:gw.port ~path:"/v1/chat/completions"
+              ~headers:[ ("X-Oasis-Category", "general"); ("Content-Type", "application/json") ]
+              ~body
+          with
+          | Error e -> Error e
+          | Ok (status, resp) ->
+              Test.assert_equal ~expected:200 ~actual:status;
+              let up = Mock.last_request (nth_mock mocks 0) in
+              Test.assert_equal ~expected:true ~actual:(String.contains up "\"tools\"");
+              Test.assert_equal ~expected:true ~actual:(String.contains up "\"get_weather\"");
+              Test.assert_equal ~expected:true ~actual:(String.contains up "\"tool_choice\":\"auto\"");
+              Test.assert_equal ~expected:true ~actual:(String.contains up "\"temperature\"");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "\"tool_calls\"");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "call_1");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "\"finish_reason\":\"tool_calls\"");
+              Ok ()
+        )
+    )
+
+let test_tools_stream_relays_tool_calls = fun _ctx ->
+  handoff_case ~n:1 ~extra:tools_extra
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) { (Mock.default_scenario) with sse = [ tc_open; tc_args; tc_finish ] })
+    ~check:(fun ~gw:_ ~mocks ~events ~deltas:_ ~handoffs ->
+      let datas = List.map events ~fn:(fun ev -> ev.Sse.data) in
+      Test.assert_equal ~expected:true ~actual:(List.any datas ~fn:(String.equal tc_open));
+      Test.assert_equal ~expected:true ~actual:(List.any datas ~fn:(String.equal tc_args));
+      Test.assert_equal ~expected:true ~actual:(List.any datas ~fn:(String.equal tc_finish));
+      Test.assert_equal ~expected:true ~actual:(List.any events ~fn:(fun ev -> ev.Sse.done_sentinel));
+      Test.assert_equal ~expected:true ~actual:(String.contains (Mock.last_request (nth_mock mocks 0)) "\"tools\"");
+      Test.assert_equal ~expected:0 ~actual:(List.length handoffs);
+      Ok ())
+    ()
+
+let test_tools_cut_mid_tool_call_fails_without_restart = fun _ctx ->
+  handoff_case ~n:2 ~extra:tools_extra
+    ~setup:(fun mocks ->
+      let header_len = String.length (Mock.stream_header 200) in
+      let frame1 = Mock.chunked_frame ("data: " ^ tc_open ^ "\n\n") in
+      Mock.set_scenario (nth_mock mocks 0)
+        {
+          (Mock.default_scenario) with
+          sse = [ tc_open; tc_args; tc_finish ];
+          cut_after_bytes = header_len + String.length frame1 + 3;
+        };
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ tc_open; tc_args; tc_finish ] })
+    ~check:(fun ~gw:_ ~mocks ~events ~deltas ~handoffs:_ ->
+      let datas = List.map events ~fn:(fun ev -> ev.Sse.data) in
+      Test.assert_equal ~expected:true ~actual:(List.any datas ~fn:(String.equal tc_open));
+      Test.assert_equal ~expected:false ~actual:(List.any datas ~fn:(String.equal tc_args));
+      Test.assert_equal ~expected:true ~actual:(List.any datas ~fn:(fun d -> String.contains d "oasis_upstream_failed"));
+      Test.assert_equal ~expected:true ~actual:(List.any datas ~fn:(fun d -> String.contains d "tool call"));
+      Test.assert_equal ~expected:"" ~actual:(String.concat "" deltas);
+      Test.assert_equal ~expected:"" ~actual:(Mock.last_request (nth_mock mocks 1));
+      Ok ())
+    ()
+
+let test_tools_need_openai_protocol = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let base = handoff_config mocks in
+      let config =
+        {
+          base with
+          Config.accounts =
+            List.map base.Config.accounts ~fn:(fun a -> { a with Config.protocol = "anthropic" });
+        }
+      in
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          match h_stream ~extra:tools_extra ~port:gw.port () with
+          | Error e -> Error e
+          | Ok (status, _, _) ->
+              Test.assert_equal ~expected:400 ~actual:status;
+              Test.assert_equal ~expected:"" ~actual:(Mock.last_request (nth_mock mocks 0));
+              Ok ()
+        )
+    )
+
 (* ---------- spec 0.3 §2.3–2.4: unknown prices, agent latency, quota parking ---------- *)
 
 let test_router_unknown_price_is_neutral = fun _ctx ->
@@ -2842,6 +3015,10 @@ let tests =
     case ~size:Test.Large "H5b: non-prefill fallback restarts with a notice (G3)" test_h5b_non_prefill_account_restarts;
     case ~size:Test.Large "H6: handoff limit ends with an SSE error (G0)" test_h6_handoff_limit;
     case ~size:Test.Large "H7: tools requests never splice a prefix (G3)" test_h7_tools_request_restarts;
+    case ~size:Test.Large "tools: sync request forwards tools/tool_choice/temperature, tool_calls come back" test_tools_sync_passthrough;
+    case ~size:Test.Large "tools: streamed tool_call deltas are relayed verbatim" test_tools_stream_relays_tool_calls;
+    case ~size:Test.Large "tools: cut mid tool call ends with an SSE error, no restart" test_tools_cut_mid_tool_call_fails_without_restart;
+    case ~size:Test.Large "tools: anthropic-only routes are rejected with 400" test_tools_need_openai_protocol;
     case ~size:Test.Large "H8: session pin migrates to the fallback" test_h8_session_pin_migrates;
     case "router: unknown price is neutral and reported" test_router_unknown_price_is_neutral;
     case "router: agent latency scale" test_router_agent_latency_scale;

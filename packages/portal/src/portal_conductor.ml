@@ -25,6 +25,7 @@ type conductor_ctx = {
   session: string option;
   request_id: string;
   handoff_allowed: bool;
+  extra: (string * Json.t) list;
 }
 
 type conductor_state = {
@@ -48,6 +49,7 @@ type conductor_state = {
   mutable leg_start: Time.Instant.t;
   mutable leg_id: int;
   mutable awaiting_leg_end: bool;
+  mutable tool_calls_sent: bool;
   mutable finished: bool;
 }
 
@@ -98,6 +100,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       leg_start = Time.Instant.now ();
       leg_id = 0;
       awaiting_leg_end = false;
+      tool_calls_sent = false;
       finished = false;
     }
   in
@@ -339,6 +342,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
                 else
                   upstream_body
                     ~stream_usage:account.Portal_config.stream_usage
+                    ~extra:cc.extra
                     ~model:cs.current_model
                     ~messages:messages_up
                     ~max_tokens:cc.max_tokens
@@ -368,20 +372,32 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
               ()
         )
   in
+  let emit_pending_notice () =
+    match cs.restart_on_content with
+    | None -> ()
+    | Some notice ->
+        cs.restart_on_content <- None;
+        cs.sent_text <- "";
+        if not (String.is_empty notice) then
+          let _ =
+            write_stream cc.client_stream ("data: " ^ Json.to_string (delta_chunk_json notice) ^ "\n\n")
+          in
+          ()
+  in
+  (* Tool-call deltas are relayed verbatim (ids, indices and argument
+     fragments must reach the client untouched); they never take part in a
+     prefix splice because tools requests are not handoff-applicable. *)
+  let relay_tool_event data =
+    emit_pending_notice ();
+    cs.tool_calls_sent <- true;
+    cs.tokens_out <- cs.tokens_out + (String.length data / 16);
+    match write_stream cc.client_stream ("data: " ^ data ^ "\n\n") with
+    | Error e -> finish_error e
+    | Ok () -> ()
+  in
   let forward_to_client text =
     if not (String.is_empty text) then (
-      (
-        match cs.restart_on_content with
-        | None -> ()
-        | Some notice ->
-            cs.restart_on_content <- None;
-            cs.sent_text <- "";
-            if not (String.is_empty notice) then
-              let _ =
-                write_stream cc.client_stream ("data: " ^ Json.to_string (delta_chunk_json notice) ^ "\n\n")
-              in
-              ()
-      );
+      emit_pending_notice ();
       cs.sent_text <- cs.sent_text ^ text;
       cs.tokens_out <- cs.tokens_out + (String.length text / 4);
       match
@@ -446,15 +462,18 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
               let (u_in, u_out) = stream_usage_of ~anthropic ev.Portal_sse.data in
               if Option.is_some u_in then cs.usage_in <- u_in;
               if Option.is_some u_out then cs.usage_out <- u_out;
-              let content_opt =
-                if anthropic then
-                  Portal_anthropic.extract_delta_text ev.Portal_sse.data
-                else
-                  Some (extract_delta_content ev.Portal_sse.data)
-              in
-              match content_opt with
-              | None -> ()
-              | Some content -> handle_content content
+              if (not anthropic) && is_tool_call_event ev.Portal_sse.data then
+                relay_tool_event ev.Portal_sse.data
+              else
+                let content_opt =
+                  if anthropic then
+                    Portal_anthropic.extract_delta_text ev.Portal_sse.data
+                  else
+                    Some (extract_delta_content ev.Portal_sse.data)
+                in
+                match content_opt with
+                | None -> ()
+                | Some content -> handle_content content
             ))
     )
   in
@@ -496,7 +515,11 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       cs.sse_state <- Portal_sse.init;
       cs.awaiting_leg_end <- false;
       let delivered = not (String.is_empty cs.sent_text) in
-      if not delivered then
+      if cs.tool_calls_sent then
+        (* a half-streamed tool call cannot be spliced or restarted without
+           the client seeing corrupt arguments *)
+        finish_failed ~reason:("upstream " ^ cs.current_account ^ " failed after streaming a tool call: " ^ err)
+      else if not delivered then
         start_next ()
       else if cs.handoff_count >= policy.Portal_config.max_handoffs then
         finish_failed ~reason:("handoff limit reached after " ^ cs.current_account ^ " failed: " ^ err)
