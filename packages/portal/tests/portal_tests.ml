@@ -2554,7 +2554,13 @@ let test_gateway_loopback_guards = fun _ctx ->
           Test.assert_equal
             ~expected:403
             ~actual:(status ~method_:"POST" ~path:"/v1/chat/completions" ~headers:[ ("Origin", "https://evil.example") ]);
-          Test.assert_equal ~expected:404 ~actual:(status ~method_:"GET" ~path:"/api/reload" ~headers:[]);
+          Test.assert_equal ~expected:405 ~actual:(status ~method_:"GET" ~path:"/api/reload" ~headers:[]);
+          (
+            match gw_get ~port:gw.port ~path:"/api/accounts" with
+            | Ok (_, body) ->
+                Test.assert_equal ~expected:true ~actual:(String.contains body "\"cost_routing_effective\":false")
+            | Error e -> Test.assert_equal ~expected:"" ~actual:e
+          );
           Ok ()
     )
 
@@ -2837,7 +2843,7 @@ let tests =
     case "signals: parked persistence roundtrip" test_signals_parked_roundtrip;
     case ~size:Test.Large "gateway: quota 429 parks the account across restarts" test_gateway_quota_parks_across_restart;
     case ~size:Test.Large "gateway: bearer auth on /v1, /api, /mcp, /ws" test_gateway_bearer_auth;
-    case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 404" test_gateway_loopback_guards;
+    case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 405" test_gateway_loopback_guards;
     case ~size:Test.Large "gateway: decisions.jsonl survives a restart" test_gateway_decisions_survive_restart;
     case ~size:Test.Large "gateway: streaming usage chunk feeds the ledger" test_gateway_stream_usage_recorded;
     case "audit: secret redaction and hash8" test_redact_secrets;

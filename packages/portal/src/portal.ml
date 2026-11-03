@@ -7,7 +7,10 @@ open Std
     - handoff: [Handoff] (seamless mid-stream continuation splice)
     - brain: [Kb] (model knowledge base), [Config] (TOML config),
       [Ledger] (cost accounting), [Router] (scheduling + decisions)
-    - front: [Gateway] (OpenAI-compatible HTTP server)
+    - front: [Gateway] (OpenAI-compatible HTTP server), built from
+      Portal_state / Portal_ws / Portal_upstream / Portal_decisions /
+      Portal_conductor / Portal_exec_account / Portal_exec_agent / Portal_api /
+      Portal_mcp_tools / Portal_dashboard / Portal_http
     - test harness: [Mock] (programmable mock OpenAI server) *)
 
 module Chunked = Portal_chunked
@@ -29,4 +32,6 @@ module Inbox = Portal_inbox
 module Discover = Portal_discover
 module Activity = Portal_activity
 module AgentWorker = Portal_agent_worker
+module Conductor = Portal_conductor
+module Http = Portal_http
 module Gateway = Portal_gateway
