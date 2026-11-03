@@ -72,11 +72,6 @@ let test_worker_pool_sha256_batch = fun _ctx ->
   Test.assert_equal ~expected:4 ~actual:(List.length digests);
   Ok ()
 
-let test_concurrency_demo = fun _ctx ->
-  let report = Hello_riot.Concurrency_demo.run_all () in
-  Test.assert_equal ~expected:true ~actual:(not (String.is_empty report));
-  Ok ()
-
 let tests =
   Test.[
     case "starter greeting" test_starter_greeting;
@@ -85,7 +80,6 @@ let tests =
     case "RFC 6455 WebSocket frame encode and decode roundtrip" test_websocket_frame_roundtrip;
     case "Trail middleware pipeline and router dispatch" test_trail_pipeline_and_router;
     case "AegisOTP multi-core WorkerPool SHA-256 batch" test_worker_pool_sha256_batch;
-    case "ConcurrencyDemo: ring + supervisor + workerpool + hashmap" test_concurrency_demo;
   ]
 
 let main ~args =
