@@ -7,12 +7,24 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
 
+      - name: Native build dependencies (std links uuid, ssl, crypto, z; kernel links pcre2)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends uuid-dev libssl-dev zlib1g-dev libpcre2-dev
+
       - uses: leostera/riot/docker/setup-riot@main
+
+      - name: Fetch registry sources
+        run: riot plan > /dev/null
+
+      - name: Patch Riot kernel/std (GC root, lost wakeups; see patches/riot)
+        run: scripts/patch-riot.sh
 
       - run: riot build
       - run: riot test

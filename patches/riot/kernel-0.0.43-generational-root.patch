@@ -1,0 +1,18 @@
+--- a/native/kernel_new_async_unix.c
++++ b/native/kernel_new_async_unix.c
+@@ -89,7 +89,6 @@
+     *(binding->token_root) = token;
+     caml_register_generational_global_root(binding->token_root);
+   } else {
+-    *(binding->token_root) = token;
+     caml_modify_generational_global_root(binding->token_root, token);
+   }
+   return binding;
+@@ -652,7 +651,6 @@
+   kernel_new_linux_binding *binding,
+   value token
+ ) {
+-  *(binding->token_root) = token;
+   caml_modify_generational_global_root(binding->token_root, token);
+ }
+ 
