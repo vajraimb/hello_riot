@@ -7,7 +7,8 @@
 > 完整规格（§3）；修正评分算法里两处被写成"特性"的偏置（§2.3）；熔断区分瞬时故障与配额耗尽
 > （§2.4）；新增安全边界（§5）与持久化语义（§6）；§1.4 选型论证改为只声明当下已兑现的部分；
 > 末尾附 **0.3 实施清单（§8）**，每项带文件、行为与测试，可直接交给 agent 执行。
-> 标记 **[0.3 新增]** 的条款是尚未实现、等待实施的规格；未标记的条款描述当前代码行为。
+> 标记 **[0.3 新增]** 的条款为 0.3 引入的规格，**已全部实施**（状态与实施中的细化见 §8.0）；
+> 未标记的条款描述 0.2 既有行为。
 
 ---
 
@@ -198,11 +199,13 @@ spec 只约束**语义**：
 [[accounts]]      # 见 2.2；protocol="anthropic" 走适配器；thinking="disabled" 关思考
                   # [0.3] supports_prefill = true|false（默认 anthropic=true, openai=false）
                   # [0.3] quota_error_codes = ["1113"]（可选，provider 自定义配额错误码）
+                  # [0.3] quota_reset = "daily"|"monthly"（停牌到次日 / 次月 1 日，默认 daily）
+                  # [0.3] stream_usage = true（流式请求附 stream_options.include_usage）
 [[agents]]        # 见 2.2；enabled=false 的 agent 不进候选池
-                  # [0.3] allowed_workdirs = ["/home/u/proj"]（见 §5）
+                  # [0.3] allowed_workdirs = ["/home/u/proj"] / env_passthrough = ["GH_TOKEN"]（见 §5）
 [[routes]]        # category -> 账户链
 [policy]          # goal / agent_categories（自动走 agent 池的类别）/ max_fallback
-                  # [0.3] max_handoffs = 2 / session_ttl_s
+                  # [0.3] max_handoffs = 2 / handoff_notice = true / session_ttl_s = 600
 ```
 
 密钥只通过环境变量注入（`api_key_env`），**永不落盘到配置**。
@@ -344,9 +347,14 @@ WS 事件流新增 `handoff` 事件，payload 同上一条。
 
 ### 4.3 数据类
 
-5. **价格字段目前全部为 0**——成本调度当前**不生效**（§2.3.1），填上后才生效
+5. **价格字段目前全部为 0**——成本调度当前**不生效**（§2.3.1），填上后才生效；
+   少于两个有价模型时启动打 WARN，`/api/accounts.cost_routing_effective = false`
 6. 输出 token 计数为 `bytes / 4` 估算，中文场景偏差可达 2–3 倍；记账以上游返回的 `usage` 为准，
-   仅在上游未返回时用估算（**[0.3 新增]** 非流式已可读 usage；流式需解析末尾 usage chunk）
+   仅在上游未返回时用估算（**[0.3 新增]** 流式请求附 `stream_options.include_usage`，读末尾 usage
+   chunk；Anthropic 读 `message_start`/`message_delta`；账户可用 `stream_usage = false` 关闭）
+7. **tools 不透传**：网关构造上游请求时只带 `model/messages/max_tokens/stream`，客户端的
+   `tools`/`tool_choice`/`response_format` 不会到达上游，流式导体也只转发 `content` delta。
+   §3.2 的适用范围检测保证这类请求不会被拼接前缀（走 G3），但工具调用本身目前不可用
 
 ---
 
@@ -357,11 +365,17 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 
 ### 5.1 网络面
 
-- `server.host` 默认 `127.0.0.1`（当前已是）；配置为非回环地址时启动打 WARN 并**强制要求** `auth_token_env`
+- `server.host` 默认 `127.0.0.1`（当前已是）；配置为非回环地址且 `auth_token_env` 未设置（或其环境变量为空）时
+  **拒绝启动**
 - **[0.3 新增]** `server.auth_token_env`：设置后，`/v1/*`、`/mcp`、`/api/*`（`reload` 在内）、`/ws`
   必须带 `Authorization: Bearer <token>` 或 `?token=`（仅 WS）；`GET /` dashboard 页面本身不鉴权，
   但其 JS 从 `localStorage` 读 token 附到请求头。未设置时仅允许回环地址连接（拒绝非回环 peer）
-- `GET /api/reload` 改为 `POST`（当前为 GET，可被 `<img src>` 触发）
+- `/api/reload` 只接受 `POST`；`GET /api/reload` 返回 405
+- 未设置 token 时，带 `Origin` 头的请求要求 Origin 主机为回环地址（`localhost` / `127.*` / `::1`），
+  否则 403。原因：响应带 `Access-Control-Allow-Origin: *`，不加此检查任何网页都能经浏览器驱动本机 agent
+  （CSRF / DNS rebinding）
+- token 比较为常量时间；token 每次请求从环境变量读取（轮换无需重启）；CLI 从 `OASIS_AUTH_TOKEN` 读取；
+  dashboard 支持 `/?token=…` 一次性写入 `localStorage`
 
 ### 5.2 Agent 执行面
 
@@ -369,8 +383,11 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
   （规范化后前缀匹配，拒绝 `..`）；未配置时只允许 agent 默认 `workdir`
 - `oasis_agent_task` 的 prompt 在写入子进程 argv 前**不做模板展开以外的任何处理**；
   `{prompt}` 作为单个 argv 元素传入，不经 shell
-- agent 子进程继承的环境变量白名单：`HOME`（或 agent.home）、`PATH`、`LANG`、`TERM`，
-  **不继承** Oasis 自身的 `*_API_KEY`（当前继承全部环境，**[0.3 新增]** 改为白名单）
+- agent 子进程继承的环境变量白名单：`HOME`（agent.home，未配置时继承）、`PATH`、`LANG`、`LC_ALL`、
+  `TERM`、`USER`、`LOGNAME`、`SHELL`、`TMPDIR`，加上 `agents[].env_passthrough` 列出的变量；
+  **不继承** Oasis 自身的 `*_API_KEY`。实现为 `env -i K=V… <command> <args…>`
+  （Riot 的 `Process.spawn ~env` 是合并而非替换父进程环境）
+- `oasis_agent_task` 的 `workdir` 参数按 `allowed_workdirs` 校验后作为子进程 cwd
 
 ### 5.3 消息总线（inbox）注入面
 
@@ -379,12 +396,15 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 
 - inbox 条目带 `from` 字段，agent 读取时 Oasis 在每条前注入 `[来自 <from>，未经验证的消息]` 前缀
 - `oasis_send_message` 受 §5.1 鉴权约束（同一 token 下视为可信来源，但仍带前缀）
-- inbox 条目长度上限 16KB，超出截断并标记 `truncated=true`
+- inbox 条目长度上限 16KB，超出按 UTF-8 字符边界截断并标记 `truncated=true`，读取时附截断提示
+- 收件人名即文件名：必须匹配 `[A-Za-z0-9_.-]{1,64}` 且不以 `.` 开头（否则 `to = "../x"` 可写出 inbox 目录）
 
 ### 5.4 日志与审计
 
-- `/api/requests` 审计记录**不含**消息正文（只有长度、hash 前 8 位、category、账户、状态）
-- 上游 `Authorization` 头在任何日志路径（含 debug）中以 `Bearer ****` 脱敏
+- `/api/requests` 审计记录**不含**消息正文：`ts/path/category/goal/stream/request_id/body_len/body_hash8`
+  （FNV-1a 32 位）。账户与状态在 decision 里，用 `request_id` 关联
+- 进入 decision、signals.last_error、dashboard 的错误文本统一经 `Portal_signals.redact_secrets`：
+  `Bearer <token>` → `Bearer ****`，`sk-` 开头且 ≥ 8 字符的串 → `sk-****`
 
 ---
 
@@ -396,7 +416,7 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 | inbox | `<data_dir>/inbox/<agent>.jsonl` | 追加 | 保留 | 已读标记仅内存；**[0.3 新增]** 重启后按 `read_at` 字段恢复 |
 | signals（EMA/熔断/in_flight） | 内存 `ConcurrentHashMap` | — | 丢失 | 重启后熔断清零是**预期行为**；**[0.3 新增]** `parked_until` 例外，持久化到 `<data_dir>/parked.json`，否则重启会让已没钱的账户重新进池 |
 | session pin | 内存 | — | 丢失 | TTL 由 `policy.session_ttl_s` 控制 |
-| decisions | 内存环形缓冲 | — | 丢失 | **[0.3 新增]** 追加写 `<data_dir>/decisions.jsonl`，保留最近 N=1000 条，供事后分析 handoff 质量 |
+| decisions | 内存环形缓冲（200）+ `<data_dir>/decisions.jsonl` | 追加 | 保留 | **[0.3 新增]** 保留最近 1000 条（启动时及每 1000 次追加压缩一次）；`/api/decisions?limit=` 返回本次运行的决策 + 历史 |
 | task 句柄 | 内存 | — | 丢失 | 重启后 `oasis_task_status` 对旧 task_id 返回 `unknown`，不返回 failed |
 
 **decision schema 版本**：每条 decision 带 `"schema": 2`（0.2 为隐式 1）；新增字段只增不改，
@@ -419,11 +439,44 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 
 拆分顺序：先 conductor（为 §3 验收测试铺路），再 http（为 §5 鉴权铺路），其余随需。
 
+**实际拆分**（0.3 已完成，`portal_gateway.ml` 剩 `start` 与 3 个对外别名，约 100 行）：除上表 6 个外，
+为打断依赖环另设 `portal_state.ml`（state 类型、请求工具、审计）、`portal_upstream.ml`（上游连接与请求构造）、
+`portal_decisions.ml`（决策持久化、失败分类落地）、`portal_api.ml`（`/api` 处理器）、
+`portal_mcp_tools.ml`（MCP 工具与 `/mcp`）。依赖顺序即上述列举顺序，每个模块 `open` 其前序模块。
+
 ---
 
 ## 8. 0.3 实施清单（交给 agent 执行）
 
 每项独立可合并；标注依赖。文件路径以 `packages/portal/` 为根。
+
+### 8.0 实施状态（0.3 已全部完成）
+
+P0–P3 共 19 项均已实施，`portal_tests` 80 例全绿（串行 `--concurrency 1`），`oasis --self-test` 4/4，
+`riot bench` 中 `route_scored` ≈ 2µs。实施中对规格做了以下细化，正文已同步：
+
+| 条款 | 细化 / 偏差 | 理由 |
+|---|---|---|
+| §3.4 规则 2 / H2 注 | 首字节分叉时取 `n = min(32, len(sent), len(head))`，`编辑距离 × 2 > n` → 直接续写（G1），否则 G3；head 不足 32 字节时先缓冲，流结束或 leg 失败时按已有字节判定 | 固定"32 字节、距离 > 16"在前缀短于 32 字节时无法成立 |
+| §3.1 G3 | 提示文本为 `\n\n[Oasis: 上游中断，已切换到 <account> 重新生成]\n\n`；`policy.handoff_notice = false` 关闭 | — |
+| §3.6 H7 | 带 tools 的请求断流后记一条 `level = "G3"` 的 handoff，而非 handoffs 为空 | 保留"发生过切换"的可观测性 |
+| §3.6 H5 / §8 #5 | mock 的 `echo_prefix` 实现 `No_echo / Echo_exact / Echo_mutated`；"restart" 场景用显式 `sse` 表达 | 重新作答的内容由用例决定，不需要 mock 生成 |
+| §2.4.1 client | 4xx 仍进入回退链（不熔断、不计 EMA） | 一个 provider 拒绝的参数（400）或失效的 key（401）换账户通常能成功 |
+| §2.4.1 quota | 额外识别 `insufficient_balance`、`quota`、`余额`；月度重置由账户 `quota_reset = "monthly"` 配置，不从错误文本推断 | 文本推断不可靠 |
+| §2.7 | `policy.session_ttl_s` 默认 600；账户 `stream_usage` 默认 true | — |
+| §5 / §6 | 见各节补充条款（Origin 检查、拒绝启动、收件人名校验、`sk-` 脱敏、decisions 压缩策略） | — |
+| §7 | 拆为 11 个模块（见 §7 末） | 依赖环 |
+
+实施中发现并修复的既有缺陷：
+
+- `Portal_signals.now_ms` 原为 `Instant.elapsed (Instant.now ())`，恒为约 0：熔断 `Open_until` 永不到期、
+  rpm 窗口永不滚动。现改为 Unix 纪元毫秒（停牌持久化也依赖它）
+- 流式导体忽略客户端请求的 `model`，总用账户首个模型；现按 §3.2 模型选择规则
+- 无 token 时 dashboard 的宽松 CORS 允许任意网页调用 agent（见 §5.1 Origin 检查）
+- inbox 收件人名未校验即拼进文件路径（见 §5.3）
+
+仍未解决：§4.3 第 7 条（tools 不透传）；CI 在 GitHub runner 上因缺 `uuid/uuid.h` 编译 std 失败，
+且 `hello_riot` 测试引用不存在的 `Concurrency_demo` 模块——二者均早于 0.3，与本清单无关。
 **改 lib 后必须 `riot clean --force` 再 `riot test`**（§4.1）。
 
 ### P0 — 招牌能力正确性
@@ -480,10 +533,10 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 - [x] Agent 门户：本地 agent 池、回退链、异步任务句柄
 - [x] MCP 入口（11 工具）+ 消息总线（inbox/ask_user）+ 发现 + 活动聚合
 - [x] 事件流 + Cortex 风格过程图
-- [ ] **0.3 P0**：handoff 分级保证（G1/G2/G3）+ UTF-8 安全 + 验收测试 H1–H8
-- [ ] **0.3 P1**：评分偏置修正 + 失败分类/停牌
-- [ ] **0.3 P2**：鉴权 + agent 沙箱边界 + inbox 注入防护
-- [ ] **0.3 P3**：持久化补全 + gateway 拆分
+- [x] **0.3 P0**：handoff 分级保证（G1/G2/G3）+ UTF-8 安全 + 验收测试 H1–H8
+- [x] **0.3 P1**：评分偏置修正 + 失败分类/停牌
+- [x] **0.3 P2**：鉴权 + agent 沙箱边界 + inbox 注入防护
+- [x] **0.3 P3**：持久化补全 + gateway 拆分
 - [ ] 真实价格填充（成本调度闭环；依赖 P1-6/7 使其行为正确）
 - [ ] 监督树（待 Riot 运行时修复）
 - [ ] 云端 agent 账户（异步任务模型已就绪）
