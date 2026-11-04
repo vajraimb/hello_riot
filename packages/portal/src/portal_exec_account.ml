@@ -134,6 +134,20 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                        }
                       :: acc)
                       rest
+                | Ok (200, resp_body, latency_ms) when (not anthropic) && Option.is_some (empty_answer_of resp_body) ->
+                    let err = empty_answer_of resp_body |> Option.unwrap_or ~default:"empty_answer" in
+                    emit_attempt_finished state ~request_id ~account:name ~status:(Some 200) ~latency_ms ~error:(Some err);
+                    try_attempts
+                      ({
+                         Portal_router.account = name;
+                         model = upstream_model;
+                         status = Some 200;
+                         error = Some err;
+                         latency_ms;
+                         cost_nano = 0;
+                       }
+                      :: acc)
+                      rest
                 | Ok (status, resp_body, latency_ms) ->
                     emit_attempt_finished state ~request_id ~account:name ~status:(Some status) ~latency_ms ~error:None;
                     if status = 200 then (

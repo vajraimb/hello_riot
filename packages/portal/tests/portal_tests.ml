@@ -2599,6 +2599,85 @@ let test_stream_eof_without_finish_is_a_cut = fun _ctx ->
           Ok ())
     ()
 
+let reasoning_only_sse =
+  [
+    "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning_content\":\"let me think\"}}]}";
+    "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning_content\":\" harder\"},\"finish_reason\":\"length\"}]}";
+  ]
+
+let test_stream_reasoning_only_fails_over = fun _ctx ->
+  match start_mocks 2 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      Mock.set_scenario (nth_mock mocks 0) { (Mock.default_scenario) with sse = reasoning_only_sse };
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ "answer" ] };
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          match ws_connect ~port:gw.port with
+          | Error e -> Error e
+          | Ok ws -> (
+              sleep (Time.Duration.from_millis 100);
+              match h_stream ~port:gw.port () with
+              | Error e -> Error e
+              | Ok (_, _, deltas) ->
+                  Test.assert_equal ~expected:"answer" ~actual:(String.concat "" deltas);
+                  let evs =
+                    ws_collect_events ws ~stop:(fun j -> String.equal (h_field_str j "event") "task_done")
+                  in
+                  let data j = Json.get_field "data" j |> Option.unwrap_or ~default:(Json.obj []) in
+                  let is ev j = String.equal (h_field_str j "event") ev in
+                  let first_fail =
+                    List.find evs ~fn:(fun j -> is "attempt_finished" j && String.equal (h_field_str (data j) "account") "acc_0")
+                  in
+                  Test.assert_equal
+                    ~expected:"empty_answer_reasoning_exhausted"
+                    ~actual:(first_fail |> Option.map ~fn:(fun j -> h_field_str (data j) "error") |> Option.unwrap_or ~default:"");
+                  let thinking =
+                    List.filter_map evs ~fn:(fun j ->
+                      if is "agent_step" j then
+                        Json.get_field "step" (data j) |> Option.map ~fn:(fun st -> h_field_str st "text")
+                      else None)
+                  in
+                  Test.assert_equal ~expected:"let me think harder" ~actual:(String.concat "" thinking);
+                  Test.assert_equal ~expected:false ~actual:(List.any evs ~fn:(is "handoff"));
+                  Ok ()
+            )
+        )
+    )
+
+let test_nonstream_empty_answer_fails_over = fun _ctx ->
+  match start_mocks 2 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      Mock.set_scenario (nth_mock mocks 0)
+        {
+          (Mock.default_scenario) with
+          body =
+            "{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"hmm\"},\"finish_reason\":\"length\"}]}";
+        };
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with body = openai_ok_body ~content:"real answer" };
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let body =
+            Json.to_string
+              (Json.obj
+                [
+                  ("model", Json.string "m-x");
+                  ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "q") ] ]);
+                  ("max_tokens", Json.int 64);
+                ])
+          in
+          match gw_post ~port:gw.port ~path:"/v1/chat/completions" ~headers:[ ("Content-Type", "application/json") ] ~body with
+          | Error e -> Error e
+          | Ok (status, resp) ->
+              Test.assert_equal ~expected:200 ~actual:status;
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "real answer");
+              Ok ()
+        )
+    )
+
 let test_ws_events_trace_streaming_handoff = fun _ctx ->
   match start_mocks 2 with
   | Error e -> Error e
@@ -3521,6 +3600,8 @@ let tests =
     case ~size:Test.Large "agent: exit reaps helpers that keep stdout open" test_agent_exit_reaps_lingering_helpers;
     case "classify: prompt content to category" test_classify_prompts;
     case "feed: explains inferred category" test_feed_explains_inferred_category;
+    case "stream: reasoning-only answer fails over" test_stream_reasoning_only_fails_over;
+    case "non-stream: empty answer fails over" test_nonstream_empty_answer_fails_over;
     case "feed: folds events into one task record" test_feed_folds_events;
     case ~size:Test.Large "feed: gateway records agent work steps" test_gateway_feed_records_agent_steps;
     case ~size:Test.Large "agent: watchdog timeout kills the whole process tree" test_agent_timeout_kills_process_tree;

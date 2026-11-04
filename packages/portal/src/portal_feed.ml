@@ -129,7 +129,10 @@ let category_text = fun c ->
 let error_text = fun (err : string) ->
   let e = String.lowercase_ascii err in
   let has s = String.contains e s in
-  if has "exited with code" then
+  if has "empty_answer_reasoning_exhausted" then
+    "思考用完了 max_tokens 仍没给出回答（推理模型常见），已换下一个候选"
+  else if has "empty_answer" then "正常结束但没有输出任何回答，已换下一个候选"
+  else if has "exited with code" then
     "进程异常退出（" ^ err ^ "）——多半是 CLI 未登录、参数不兼容或自身报错"
   else if has "timeout" then "超时未完成"
   else if has "401" || has "403" || has "auth" || has "invalid_api_key" || has "unauthorized" then

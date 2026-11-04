@@ -50,6 +50,8 @@ type conductor_state = {
   mutable leg_id: int;
   mutable awaiting_leg_end: bool;
   mutable saw_finish_reason: bool;
+  mutable thinking_buf: string;
+  mutable thought_any: bool;
   mutable tool_calls_sent: bool;
   mutable finished: bool;
 }
@@ -102,6 +104,8 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       leg_id = 0;
       awaiting_leg_end = false;
       saw_finish_reason = false;
+      thinking_buf = "";
+      thought_any = false;
       tool_calls_sent = false;
       finished = false;
     }
@@ -451,6 +455,22 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
         sync_open_handoff ();
         apply_step step
   in
+  (* thinking goes to the task timeline in batches, never to the client *)
+  let flush_thinking () =
+    if not (String.is_empty cs.thinking_buf) then (
+      emit_agent_step cc.c_state ~request_id:cc.request_id ~agent:cs.current_account
+        (Portal_steps.thinking ~delta:true cs.thinking_buf);
+      cs.thinking_buf <- ""
+    )
+  in
+  let note_thinking data =
+    let r = extract_delta_reasoning data in
+    if not (String.is_empty r) then (
+      cs.thought_any <- true;
+      cs.thinking_buf <- cs.thinking_buf ^ r;
+      if String.length cs.thinking_buf >= 240 then flush_thinking ()
+    )
+  in
   let handle_chunk chunk =
     if not cs.finished then (
       let (events, sse') = Portal_sse.feed cs.sse_state chunk in
@@ -479,6 +499,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
               if Option.is_some u_out then cs.usage_out <- u_out;
               if (not anthropic) && has_finish_reason ev.Portal_sse.data then
                 cs.saw_finish_reason <- true;
+              if not anthropic then note_thinking ev.Portal_sse.data;
               if (not anthropic) && is_tool_call_event ev.Portal_sse.data then
                 relay_tool_event ev.Portal_sse.data
               else
@@ -494,14 +515,19 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
             ))
     )
   in
-  let handle_failure ~err ~status ~body =
+  let handle_failure ~penalize ~err ~status ~body =
     if not cs.finished then (
+      flush_thinking ();
+      cs.thought_any <- false;
       let latency_ms =
         Time.Duration.to_millis (Time.Instant.elapsed cs.leg_start)
       in
-      let _ =
-        apply_failure cc.c_state cc.config ~account:cs.current_account ~status ~body ~err
-      in
+      if penalize then (
+        let _ =
+          apply_failure cc.c_state cc.config ~account:cs.current_account ~status ~body ~err
+        in
+        ()
+      );
       Portal_ledger.record
         cc.c_state.ledger
         ~account:cs.current_account
@@ -564,7 +590,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
           handle_chunk c;
           loop ()
       | `Failed e ->
-          handle_failure ~err:e ~status:None ~body:"";
+          handle_failure ~penalize:true ~err:e ~status:None ~body:"";
           loop ()
       | `Head (s, body) ->
           let err =
@@ -573,21 +599,26 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
             else
               "upstream_http_" ^ Int.to_string s ^ ": " ^ body
           in
-          handle_failure ~err ~status:(Some s) ~body;
+          handle_failure ~penalize:true ~err ~status:(Some s) ~body;
           loop ()
       | `Leg_end ->
-          if cs.awaiting_leg_end then
+          if cs.awaiting_leg_end || cs.saw_finish_reason then flush_handoff ();
+          flush_thinking ();
+          if (cs.awaiting_leg_end || cs.saw_finish_reason) && String.is_empty cs.sent_text && not cs.tool_calls_sent then (
+            (* a clean end with no answer (typically a reasoning model that
+               spent max_tokens thinking): fail over, but the account is fine *)
+            let err = if cs.thought_any then "empty_answer_reasoning_exhausted" else "empty_answer" in
+            handle_failure ~penalize:false ~err ~status:None ~body:"";
+            loop ()
+          ) else if cs.awaiting_leg_end || cs.saw_finish_reason then
             finish_ok ()
-          else if cs.saw_finish_reason then (
-            flush_handoff ();
-            finish_ok ()
-          ) else (
+          else (
             (* the upstream closed without a done event: treat as a cut *)
-            handle_failure ~err:"upstream_stream_ended_early" ~status:None ~body:"";
+            handle_failure ~penalize:true ~err:"upstream_stream_ended_early" ~status:None ~body:"";
             loop ()
           )
       | exception Receive_timeout ->
-          handle_failure ~err:"upstream_stream_timeout" ~status:None ~body:"";
+          handle_failure ~penalize:true ~err:"upstream_stream_timeout" ~status:None ~body:"";
           loop ()
     )
   in

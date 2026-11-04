@@ -358,7 +358,7 @@ async function run() {
   setTimeout(() => { $('run').disabled = false; }, 600);
   promptEl.value = ''; promptEl.style.height = 'auto';
   try {
-    const res = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: null, messages: [{ role: 'user', content: text }], max_tokens: 4096, stream: true }) });
+    const res = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: null, messages: [{ role: 'user', content: text }], max_tokens: 16384, stream: true }) });
     if (!res.ok || !res.body) {
       let msg = 'HTTP ' + res.status;
       try { const j = await res.json(); msg += ' ' + (j.error || JSON.stringify(j)); } catch (e) {}

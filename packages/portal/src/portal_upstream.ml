@@ -257,6 +257,49 @@ let extract_delta_content = fun (data : string) ->
             ""
     )
 
+(** For a 200 OpenAI-style response with no answer and no tool calls: the
+    error code to fail over with. *)
+let empty_answer_of = fun (body : string) ->
+  match Json.from_string body with
+  | Error _ -> None
+  | Ok j -> (
+      match
+        Json.get_field "choices" j
+        |> Option.and_then ~fn:Json.get_array
+        |> Option.and_then ~fn:List.head
+        |> Option.and_then ~fn:(fun c -> Json.get_field "message" c)
+      with
+      | None -> None
+      | Some m ->
+          let field k = Json.get_field k m |> Option.and_then ~fn:Json.get_string |> Option.unwrap_or ~default:"" in
+          let has_tools =
+            Json.get_field "tool_calls" m |> Option.and_then ~fn:Json.get_array
+            |> Option.map ~fn:(fun l -> not (List.is_empty l)) |> Option.unwrap_or ~default:false
+          in
+          if has_tools || not (String.is_empty (String.trim (field "content"))) then None
+          else if String.is_empty (field "reasoning_content" ^ field "reasoning") then Some "empty_answer"
+          else Some "empty_answer_reasoning_exhausted"
+    )
+
+(** Thinking text of an OpenAI-style stream event ([reasoning_content], or
+    OpenRouter's [reasoning]); never part of the answer. *)
+let extract_delta_reasoning = fun (data : string) ->
+  match Json.from_string data with
+  | Error _ -> ""
+  | Ok j -> (
+      match
+        Json.get_field "choices" j
+        |> Option.and_then ~fn:Json.get_array
+        |> Option.and_then ~fn:List.head
+        |> Option.and_then ~fn:(fun c -> Json.get_field "delta" c)
+      with
+      | None -> ""
+      | Some delta ->
+          let field k = Json.get_field k delta |> Option.and_then ~fn:Json.get_string |> Option.unwrap_or ~default:"" in
+          let r = field "reasoning_content" in
+          if String.is_empty r then field "reasoning" else r
+    )
+
 (** True for an OpenAI stream event whose first choice has a non-null
     [finish_reason]. Some upstreams (Perplexity) end the stream with such an
     event and close without [data: [DONE]]. *)

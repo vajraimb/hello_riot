@@ -159,6 +159,11 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 - **流式（账户）**：导体 actor 管理当前 leg；上游断流/错误 → 触发 handoff（§3）。
   正常结束 = `data: [DONE]`，或收到非空 `finish_reason` 后上游关闭（Perplexity 不发 `[DONE]`）；
   两者都没有就关闭视为断流
+- **空回答**：上游"正常结束"但没给客户端任何正文或工具调用（典型是推理模型把 `max_tokens` 全花在
+  `reasoning_content` 上，`finish_reason: length`），流式与非流式都按失败处理并换下一个候选
+  （`empty_answer_reasoning_exhausted` / `empty_answer`）；这类失败**不计入账户健康度**（不触发熔断）。
+  推理模型的 `reasoning_content`（OpenRouter 为 `reasoning`）不进回答，按 ~240 字一批作为 `agent_step`
+  的 `thinking` 步骤推到控制台时间线。控制台请求 `max_tokens` 为 16384，给推理留足预算
 - **流式（agent）**：子进程 stdout 逐行 → `Portal_steps.parse` 把 claude / cursor-agent / gemini / kimi / grok
   的 JSON 事件流解析成工作步骤（`thinking` / `text` / `tool` / `tool_result` / `usage`），非 JSON 行与未知 CLI
   按纯文本处理。只有 `text` 进入客户端 delta（末尾 `result` 是全文重复，丢弃；整条消息之间、工具调用后续写的
