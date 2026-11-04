@@ -118,6 +118,11 @@ body.resizing{cursor:col-resize;user-select:none}
 .pill.running{background:rgba(91,140,255,.15);color:var(--accent2)}
 .route{margin-top:10px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);font-size:12.5px;display:flex;gap:8px}
 .route .k{color:var(--muted);flex:none}
+.route .k.tog{cursor:pointer;user-select:none}
+.route .k.tog:hover{color:var(--text)}
+.route.fold{padding:5px 10px}
+.route.fold .rs{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
+.route.fold details{display:none}
 .route details{margin-top:6px}
 .route summary{cursor:pointer;color:var(--dim);font-size:11.5px}
 .ctable{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px}
@@ -292,7 +297,7 @@ body.resizing{cursor:col-resize;user-select:none}
       <div class="scroll" id="tasks"><div class="empty">还没有任务</div></div>
     </div>
     <div class="col" id="detail">
-      <div class="dbody" id="dbody"><div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>[</kbd> 任务栏 · <kbd>\</kbd> 侧栏</span></div></div>
+      <div class="dbody" id="dbody"><div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>[</kbd> 任务栏 · <kbd>\</kbd> 侧栏 · <kbd>g</kbd> 路由说明</span></div></div>
       <div class="follow" id="followbar">
         <div class="fw"><div class="fh" id="follow-hint"></div>
           <textarea id="follow-in" rows="2" placeholder="继续这个对话：追问、补充要求，或让它接着把任务做完（⌘↵ 发送）"></textarea></div>
@@ -381,7 +386,7 @@ document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
 });
 
 /* ---------- state ---------- */
-const S = { tasks: [], sel: null, detail: null, filter: 'all', dirtyList: true, dirtyDetail: false,
+const S = { routeFold: localStorage.getItem('oasis_route_fold') === '1', tasks: [], sel: null, detail: null, filter: 'all', dirtyList: true, dirtyDetail: false,
             localAnswers: {}, refs: {}, pendingRef: null, detailTab: 'trace', openTools: new Set(), openText: new Set(),
             threads: [], selKey: null, selThread: null, thread: null };
 
@@ -716,13 +721,14 @@ function renderDetail(scrollEnd) {
           '<button class="' + (d.user_rating < 0 ? 'on' : '') + '" onclick="rate(\'' + esc(d.id) + '\',' + (d.user_rating < 0 ? 0 : -1) + ')">👎</button></span>' : '') +
         '</div>' +
       turnsHtml +
-      (d.route_summary ? '<div class="route"><span class="k">路由</span><div style="min-width:0">' + esc(d.route_summary) + scoreTable(d.route) + '</div></div>' : '') +
+      (d.route_summary ? '<div class="route' + (S.routeFold ? ' fold' : '') + '"><span class="k tog" id="route-tog" title="' + (S.routeFold ? '展开' : '收起') + '路由说明（g）">' + (S.routeFold ? '▸' : '▾') + ' 路由</span><div class="rs" style="min-width:0">' + esc(d.route_summary) + scoreTable(d.route) + '</div></div>' : '') +
       (d.status === 'failed' && d.error ? '<div class="route" style="border-color:rgba(248,81,73,.4)"><span class="k" style="color:var(--err)">失败</span><div>' + esc(d.error) + '</div></div>' : '') +
     '</div>' +
     '<div class="dtabs"><button class="dtab' + (S.detailTab === 'trace' ? ' on' : '') + '" data-t="trace">执行过程</button>' +
       '<button class="dtab' + (S.detailTab === 'answer' ? ' on' : '') + '" data-t="answer">输出</button>' +
       (nTurns > 1 ? '<button class="dtab' + (S.detailTab === 'conv' ? ' on' : '') + '" data-t="conv">对话 · ' + nTurns + ' 轮</button>' : '') + '</div>' +
     '<div class="scroll">' + (S.detailTab === 'trace' ? renderTimeline(d) : S.detailTab === 'conv' ? renderConversation(d) : renderAnswer(answer, d)) + '</div>';
+  if ($('route-tog')) $('route-tog').onclick = toggleRoute;
   box.querySelectorAll('.dtab').forEach(b => b.onclick = () => { S.detailTab = b.dataset.t; if (S.detailTab === 'conv') loadThread(); renderDetail(S.detailTab !== 'answer'); });
   box.querySelectorAll('.tool .h').forEach(h => h.onclick = () => {
     const el = h.parentElement; el.classList.toggle('open');
@@ -739,6 +745,11 @@ function renderDetail(scrollEnd) {
   });
   const sc = box.querySelector('.scroll');
   if (sc) sc.scrollTop = (scrollEnd || (atBottom && d.status === 'running')) ? sc.scrollHeight : keepTop;
+}
+function toggleRoute() {
+  S.routeFold = !S.routeFold;
+  localStorage.setItem('oasis_route_fold', S.routeFold ? '1' : '0');
+  renderDetail(false);
 }
 function renderAnswer(answer, d) {
   if (!answer) {
@@ -946,6 +957,7 @@ document.addEventListener('keydown', e => {
   } else if (e.key === '1') { S.detailTab = 'trace'; renderDetail(true); }
   else if (e.key === '2') { S.detailTab = 'answer'; renderDetail(false); }
   else if (e.key === '3' && S.selThread) { S.detailTab = 'conv'; loadThread(); renderDetail(true); }
+  else if (e.key === 'g') { toggleRoute(); }
   else if (e.key === 'r' && S.selThread) { e.preventDefault(); $('follow-in').focus(); }
 });
 
