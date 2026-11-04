@@ -78,6 +78,54 @@ in_price_nano = 0
 out_price_nano = 0
 cache_hit_price_nano = 0
 
+[[models]]
+name = "sonar-pro"
+tier = 5
+strengths = ["research", "analysis", "general"]
+weaknesses = ["coding"]
+context_window = 200000
+max_output = 8192
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "sonar"
+tier = 3
+strengths = ["research", "general"]
+weaknesses = ["coding", "long_doc"]
+context_window = 128000
+max_output = 8192
+latency = "fast"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "qwen3:8b"
+tier = 2
+strengths = ["general"]
+weaknesses = ["coding", "long_doc", "writing"]
+context_window = 4096
+max_output = 2048
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "qwen3.7-plus"
+tier = 5
+strengths = ["coding", "general", "analysis"]
+weaknesses = []
+context_window = 1000000
+max_output = 65536
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
 [[accounts]]
 name = "deepseek_pro"
 provider = "deepseek"
@@ -128,6 +176,49 @@ tpm = 200000
 daily_limit = 200
 monthly_budget_nano = 5000000000
 
+# Perplexity：自带联网搜索。本机 DNS 把 api.perplexity.ai 污染到 128.242.240.244，
+# 用 connect_ip 直连其 Cloudflare 地址（`dig +short api.perplexity.ai @1.1.1.1`；地址变了就更新）。
+# 只认 /chat/completions，没有 /v1 前缀，所以 base_url 必须带结尾的 "/"。
+[[accounts]]
+name = "perplexity"
+provider = "perplexity"
+base_url = "https://api.perplexity.ai/"
+connect_ip = "104.18.27.48"
+api_key_env = "PERPLEXITY_API_KEY"
+models = ["sonar-pro", "sonar"]
+enabled = true
+rpm = 50
+tpm = 200000
+daily_limit = 200
+monthly_budget_nano = 5000000000
+
+# Ollama 本地模型：离线兜底。:cloud 模型需要 ollama 进程能解析 ollama.com，本机 DNS 超时，未接入。
+# Ollama 默认上下文 4096（OLLAMA_CONTEXT_LENGTH 可调），KB 必须如实填，否则长任务会被路由来截断
+[[accounts]]
+name = "ollama_local"
+provider = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+models = ["qwen3:8b"]
+enabled = true
+rpm = 0
+tpm = 0
+daily_limit = 0
+monthly_budget_nano = 0
+
+# 阿里云百炼 Coding Plan（sk-sp- key 只能走 coding.dashscope 端点）。
+# 当前 key 已过期（invalid access token or token expired），换新 key 后改 enabled = true
+[[accounts]]
+name = "dashscope_coding"
+provider = "dashscope"
+base_url = "https://coding.dashscope.aliyuncs.com/v1"
+api_key_env = "DASHSCOPE_API_KEY"
+models = ["qwen3.7-plus"]
+enabled = false
+rpm = 30
+tpm = 200000
+daily_limit = 200
+monthly_budget_nano = 0
+
 # 本地 Agent 池（需要 tools 的任务走这里；X-Oasis-Mode 头可显式切换）
 # 本机 CLI 可用性以实际为准：不可用的会被熔断自动隔离
 [[agents]]
@@ -135,6 +226,25 @@ name = "claude_code"
 command = "claude"
 args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "{prompt}"]
 models = ["claude-opus-4-6"]
+home = "/Users/vajra"
+workdir = ""
+timeout_s = 600
+capabilities = ["terminal", "files", "web"]
+tier = 5
+strengths = ["coding", "analysis", "general"]
+weaknesses = []
+context_window = 200000
+max_output = 32768
+latency = "slow"
+enabled = true
+concurrency_limit = 2
+
+# Cursor CLI：用 Cursor 账户里设置的默认模型；先在终端跑一次 `cursor-agent login`
+[[agents]]
+name = "cursor_agent"
+command = "cursor-agent"
+args = ["-p", "--output-format", "stream-json", "--force", "--trust", "{prompt}"]
+models = []
 home = "/Users/vajra"
 workdir = ""
 timeout_s = 600
@@ -166,31 +276,78 @@ latency = "slow"
 enabled = false
 concurrency_limit = 2
 
+# Gemini CLI 走 API key 认证：子进程环境是白名单，必须透传 GEMINI_API_KEY；
+# 无头模式下不加 --approval-mode yolo 会卡在工具审批上（曾挂死 40 小时）
 [[agents]]
 name = "gemini_cli"
 command = "gemini"
-args = ["-p", "{prompt}"]
+args = ["--skip-trust", "--approval-mode", "yolo", "-p", "{prompt}"]
 models = []
 home = "/Users/vajra"
 workdir = ""
 timeout_s = 600
-capabilities = ["web"]
+capabilities = ["terminal", "files", "web"]
 tier = 4
 strengths = ["general", "writing"]
 weaknesses = []
 context_window = 1000000
 max_output = 32768
 latency = "medium"
+enabled = true
+concurrency_limit = 2
+env_passthrough = ["GEMINI_API_KEY"]
+
+# Kimi CLI（OAuth 登录，凭证过期时先跑 `kimi login`）；--final-message-only 只输出最终回答
+[[agents]]
+name = "kimi_cli"
+command = "kimi"
+args = ["--print", "--final-message-only", "--yolo", "-p", "{prompt}"]
+models = []
+home = "/Users/vajra"
+workdir = ""
+timeout_s = 600
+capabilities = ["terminal", "files", "web"]
+tier = 4
+strengths = ["coding", "general", "long_doc"]
+weaknesses = []
+context_window = 256000
+max_output = 32768
+latency = "slow"
+enabled = true
+concurrency_limit = 2
+
+# Grok CLI：本机 DNS 污染了 api.x.ai / grok.com（CLI 报 prompt_ack_timeout），
+# Oasis 的 connect_ip 管不到子进程；系统 DNS 修好后再改 enabled = true
+[[agents]]
+name = "grok_cli"
+command = "grok"
+args = ["--always-approve", "-p", "{prompt}"]
+models = []
+home = "/Users/vajra"
+workdir = ""
+timeout_s = 600
+capabilities = ["terminal", "files", "web"]
+tier = 4
+strengths = ["coding", "general"]
+weaknesses = []
+context_window = 256000
+max_output = 32768
+latency = "slow"
 enabled = false
 concurrency_limit = 2
 
 [[routes]]
 category = "general"
-accounts = ["kimi_work", "deepseek_pro", "glm_zai", "openrouter"]
+accounts = ["kimi_work", "deepseek_pro", "glm_zai", "openrouter", "perplexity", "dashscope_coding", "ollama_local"]
+
+# 联网检索只有 Perplexity 能做；混入其他账户时会按时延分被抢走
+[[routes]]
+category = "research"
+accounts = ["perplexity"]
 
 [[routes]]
 category = "coding"
-accounts = ["deepseek_pro", "kimi_work", "openrouter"]
+accounts = ["deepseek_pro", "kimi_work", "openrouter", "dashscope_coding"]
 
 [policy]
 goal = "balanced"
