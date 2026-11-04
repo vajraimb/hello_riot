@@ -13,28 +13,41 @@ open Std.Collections
 
 type Message.t +=
   | Agent_call_result of (string, string) result
+  | Agent_call_line of string
 
-let run_task = fun ~(name : string) ~(agent : Portal_agent.agent) ~model ~prompt ~timeout_s () ->
+(** [on_line] runs in the caller's actor for every raw stdout line. *)
+let run_task = fun ?on_line ~(name : string) ~(agent : Portal_agent.agent) ~model ~prompt ~timeout_s () ->
   let reply_to = self () in
+  let forward =
+    match on_line with
+    | None -> fun (_ : string) -> ()
+    | Some _ -> fun line -> send reply_to (Agent_call_line line)
+  in
   let _ =
     Runtime.spawn_blocked (fun () ->
-      let res = Portal_agent.collect ~agent ~model ~prompt () in
+      let res = Portal_agent.collect ~on_line:forward ~agent ~model ~prompt () in
       send reply_to (Agent_call_result res);
       Ok ())
   in
   let selector msg =
     match msg with
-    | Agent_call_result r -> Select r
+    | Agent_call_result r -> Select (`Result r)
+    | Agent_call_line l -> Select (`Line l)
     | _ -> Skip
   in
-  match
-    receive
-      ~selector
-      ~timeout:(Time.Duration.from_secs (max 60 (timeout_s + 60)))
-      ()
-  with
-  | res -> res
-  | exception Receive_timeout -> Error ("agent watchdog timeout (" ^ name ^ ")")
+  let deadline_ms = Portal_signals.now_ms () + (max 60 (timeout_s + 60) * 1000) in
+  let rec wait () =
+    let left_ms = deadline_ms - Portal_signals.now_ms () in
+    if left_ms <= 0 then Error ("agent watchdog timeout (" ^ name ^ ")")
+    else
+      match receive ~selector ~timeout:(Time.Duration.from_millis left_ms) () with
+      | `Result res -> res
+      | `Line l ->
+          (match on_line with Some f -> f l | None -> ());
+          wait ()
+      | exception Receive_timeout -> Error ("agent watchdog timeout (" ^ name ^ ")")
+  in
+  wait ()
 
 (** No-op kept for API symmetry. *)
 let start = fun ~(agents : Portal_agent.agent list) () ->

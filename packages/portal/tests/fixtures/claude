@@ -1,0 +1,10 @@
+#!/bin/sh
+# Fake Claude Code CLI: replays a stream-json run with one tool call.
+cat <<'EOF'
+{"type":"system","subtype":"init","cwd":"/tmp"}
+{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"list the directory first"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls /tmp | head -3","description":"list"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"t1","type":"tool_result","content":"a\nb\nc","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"DONE"}]}}
+{"type":"result","subtype":"success","num_turns":2,"duration_ms":12,"result":"DONE","usage":{"output_tokens":5}}
+EOF

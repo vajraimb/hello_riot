@@ -270,12 +270,47 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
       if List.is_empty candidates then
         Error "no_agent_available"
       else
+        let request_id = new_request_id () in
+        broadcast_event
+          state
+          ~type_:"task_started"
+          ~request_id
+          ~data:
+            (Json.obj
+              [
+                ("category", Json.string category);
+                ("goal", Json.string "-");
+                ("title", Json.string (Portal_feed.title_of_text prompt));
+                ("source", Json.string "mcp");
+                ("mode", Json.string "agent");
+                ("stream", Json.bool false);
+              ]);
+        emit_routed state ~request_id ~mode:"agent" { decision with Portal_router.chosen = List.head candidates };
+        let observe nm (agent : Portal_agent.agent) =
+          emit_attempt_started state ~request_id ~account:nm;
+          agent_step_observer state ~request_id ~agent:nm ~command:agent.Portal_agent.command
+        in
+        let finished nm ~latency_ms result =
+          emit_attempt_finished
+            state
+            ~request_id
+            ~account:nm
+            ~status:(match result with Ok _ -> Some 200 | Error _ -> None)
+            ~error:(match result with Ok _ -> None | Error e -> Some e)
+            ~latency_ms;
+          match result with
+          | Ok _ -> emit_task_done state ~request_id ~chosen:(Some nm) ~attempts:1 ~ok:true
+          | Error _ -> ()
+        in
         let rec run_sync acc = function
           | [] ->
               let decision' =
                 { decision with Portal_router.attempts = List.rev acc }
               in
               record_decision state decision';
+              emit_task_done
+                ~error:(match acc with a :: _ -> "所有 agent 都失败了，最后一个：" ^ (a.Portal_router.error |> Option.unwrap_or ~default:"?") | [] -> "")
+                state ~request_id ~chosen:None ~attempts:(List.length acc) ~ok:false;
               Error
                 ("all_agents_failed: "
                 ^ (List.rev acc
@@ -320,8 +355,10 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                     Portal_signals.update state.signals nm ~fn:Portal_signals.mark_in_flight
                   in
                   let t0 = Time.Instant.now () in
-                  let result = blocking_agent_call ~agent ~model:model_for ~prompt in
+                  let on_line = observe nm agent in
+                  let result = blocking_agent_call ~on_line ~agent ~model:model_for ~prompt in
                   let latency_ms = Time.Duration.to_millis (Time.Instant.elapsed t0) in
+                  finished nm ~latency_ms result;
                   (
                     match result with
                     | Ok text ->
@@ -379,10 +416,14 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
           let nm = List.head candidates |> Option.unwrap_or ~default:"" in
           (
             match find_agent config nm with
-            | None -> Error "no_agent_available"
+            | None ->
+                emit_task_done ~error:"no_agent_available" state ~request_id ~chosen:None ~attempts:0 ~ok:false;
+                Error "no_agent_available"
             | Some agent0 ->
                 match with_overrides agent0 with
-                | Error e -> Error e
+                | Error e ->
+                    emit_task_done ~error:e state ~request_id ~chosen:None ~attempts:0 ~ok:false;
+                    Error e
                 | Ok agent ->
                 let task_id = Portal_task.new_id () in
                 let _ = Portal_task.insert state.tasks ~task_id in
@@ -396,8 +437,13 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                 let _ =
                   Runtime.spawn_blocked (fun () ->
                     let t0 = Time.Instant.now () in
-                    let result = Portal_agent.collect ~agent ~model:model_for ~prompt () in
+                    let on_line = observe nm agent in
+                    let result = Portal_agent.collect ~on_line ~agent ~model:model_for ~prompt () in
                     let latency_ms = Time.Duration.to_millis (Time.Instant.elapsed t0) in
+                    finished nm ~latency_ms result;
+                    (match result with
+                     | Error e -> emit_task_done ~error:e state ~request_id ~chosen:None ~attempts:1 ~ok:false
+                     | Ok _ -> ());
                     (
                       match result with
                       | Ok text ->

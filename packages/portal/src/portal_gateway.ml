@@ -63,6 +63,7 @@ let start = fun ~config_path ?(config : Portal_config.t option) ~port () ->
           ws_clients = ConcurrentHashMap.with_capacity ~size:64;
           decision_history = Sync.Atomic.make [];
           decisions_appended = Sync.Atomic.make 0;
+          feed = Portal_feed.create ();
         }
       in
       load_decision_history state;

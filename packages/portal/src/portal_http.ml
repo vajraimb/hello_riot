@@ -116,6 +116,9 @@ let build_trail = fun (state : state) ->
           Trail.get "/api/agents" (handle_list_agents state);
           Trail.get "/api/activity" (handle_list_activity state);
           Trail.get "/api/requests" (handle_list_requests state);
+          Trail.get "/api/feed" (handle_list_feed state);
+          Trail.get "/api/feed/task" (handle_feed_task state);
+          Trail.get "/api/alerts" (handle_list_alerts state);
           Trail.post "/api/inbox/reply" (handle_inbox_reply state);
           Trail.ws
             "/ws"

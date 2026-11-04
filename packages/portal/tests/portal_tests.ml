@@ -1647,6 +1647,128 @@ let test_agent_cursor_stream_json_parse = fun _ctx ->
     ~actual:(Agent.extract_text ~command:"cursor-agent" "{\"type\":\"tool_call\",\"subtype\":\"started\"}");
   Ok ()
 
+module Steps = Portal.Steps
+module Feed = Portal.Feed
+
+let steps_of = fun ~command line ->
+  Steps.parse ~command line |> Option.unwrap_or ~default:[]
+
+let kinds = fun steps -> List.map steps ~fn:Steps.kind
+
+let sfield = fun s k -> Steps.str s k |> Option.unwrap_or ~default:""
+
+let test_steps_parse_agents = fun _ctx ->
+  (* claude: tool_use + tool_result *)
+  let s = steps_of ~command:"claude" "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"hmm\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"ls /tmp\",\"description\":\"d\"}}]}}" in
+  Test.assert_equal ~expected:[ "thinking"; "tool" ] ~actual:(kinds s);
+  Test.assert_equal ~expected:"ls /tmp" ~actual:(sfield (List.get_unchecked s ~at:1) "input");
+  let s = steps_of ~command:"/opt/bin/claude" "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"t1\",\"type\":\"tool_result\",\"content\":\"a\\nb\",\"is_error\":true}]}}" in
+  Test.assert_equal ~expected:[ "tool_result" ] ~actual:(kinds s);
+  Test.assert_equal ~expected:(Some false) ~actual:(Json.get_field "ok" (List.get_unchecked s ~at:0) |> Option.and_then ~fn:Json.get_bool);
+  (* cursor: thinking delta, tool_call started/completed *)
+  let s = steps_of ~command:"cursor-agent" "{\"type\":\"thinking\",\"subtype\":\"delta\",\"text\":\"Run\"}" in
+  Test.assert_equal ~expected:[ "thinking" ] ~actual:(kinds s);
+  Test.assert_equal ~expected:true ~actual:(Steps.is_delta (List.get_unchecked s ~at:0));
+  let s = steps_of ~command:"cursor-agent" "{\"type\":\"tool_call\",\"subtype\":\"started\",\"call_id\":\"c1\",\"tool_call\":{\"shellToolCall\":{\"args\":{\"command\":\"ls\"}}}}" in
+  Test.assert_equal ~expected:"shell" ~actual:(sfield (List.get_unchecked s ~at:0) "name");
+  let s = steps_of ~command:"cursor-agent" "{\"type\":\"tool_call\",\"subtype\":\"completed\",\"call_id\":\"c1\",\"tool_call\":{\"shellToolCall\":{\"args\":{},\"result\":{\"success\":{\"stdout\":\"x\\n\",\"exitCode\":0}}}}}" in
+  Test.assert_equal ~expected:"x" ~actual:(sfield (List.get_unchecked s ~at:0) "output");
+  (* gemini *)
+  let s = steps_of ~command:"gemini" "{\"type\":\"tool_use\",\"tool_name\":\"run_shell_command\",\"tool_id\":\"g1\",\"parameters\":{\"command\":\"pwd\"}}" in
+  Test.assert_equal ~expected:"pwd" ~actual:(sfield (List.get_unchecked s ~at:0) "input");
+  let s = steps_of ~command:"gemini" "{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"DONE\",\"delta\":true}" in
+  Test.assert_equal ~expected:[ "text" ] ~actual:(kinds s);
+  Test.assert_equal ~expected:[] ~actual:(kinds (steps_of ~command:"gemini" "{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}"));
+  (* kimi: think + tool_calls (arguments are a json string) *)
+  let s = steps_of ~command:"kimi" "{\"role\":\"assistant\",\"content\":[{\"type\":\"think\",\"think\":\"ok\"}],\"tool_calls\":[{\"id\":\"k1\",\"function\":{\"name\":\"Shell\",\"arguments\":\"{\\\"command\\\":\\\"ls -la\\\"}\"}}]}" in
+  Test.assert_equal ~expected:[ "thinking"; "tool" ] ~actual:(kinds s);
+  Test.assert_equal ~expected:"ls -la" ~actual:(sfield (List.get_unchecked s ~at:1) "input");
+  let s = steps_of ~command:"kimi" "{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"<system>Command executed successfully.</system>\"},{\"type\":\"text\",\"text\":\"out\"}],\"tool_call_id\":\"k1\"}" in
+  Test.assert_equal ~expected:"out" ~actual:(sfield (List.get_unchecked s ~at:0) "output");
+  (* grok *)
+  let s = steps_of ~command:"grok" "{\"type\":\"tool_call\",\"toolCallId\":\"x1\",\"toolName\":\"run_terminal_command\",\"rawInput\":{\"command\":\"ls\"}}" in
+  Test.assert_equal ~expected:"run_terminal_command" ~actual:(sfield (List.get_unchecked s ~at:0) "name");
+  let s = steps_of ~command:"grok" "{\"type\":\"tool_call_update\",\"toolCallId\":\"x1\",\"status\":\"completed\",\"rawOutput\":{\"output_for_prompt\":\"exit: 0\\n/tmp\\n\",\"exit_code\":0}}" in
+  Test.assert_equal ~expected:(Some true) ~actual:(Json.get_field "ok" (List.get_unchecked s ~at:0) |> Option.and_then ~fn:Json.get_bool);
+  Test.assert_equal ~expected:[] ~actual:(kinds (steps_of ~command:"grok" "{\"type\":\"tool_call_update\",\"toolCallId\":\"x1\",\"status\":\"in_progress\"}"));
+  (* non-json output of a known CLI and unknown CLIs stay plain text *)
+  Test.assert_equal ~expected:true ~actual:(Option.is_none (Steps.parse ~command:"gemini" "Loaded cached credentials."));
+  Test.assert_equal ~expected:true ~actual:(Option.is_none (Steps.parse ~command:"opencode" "{\"type\":\"text\"}"));
+  Ok ()
+
+let test_steps_answer_join = fun _ctx ->
+  let run ~command lines =
+    let jn = Steps.joiner () in
+    List.fold_left lines ~init:"" ~fn:(fun acc l ->
+      let text, _ = Agent.consume_line jn ~command l in
+      acc ^ text)
+  in
+  Test.assert_equal
+    ~expected:"Running it.\n\nDONE"
+    ~actual:
+      (run
+        ~command:"cursor-agent"
+        [
+          "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Running it.\"}]}}";
+          "{\"type\":\"tool_call\",\"subtype\":\"started\",\"call_id\":\"c\",\"tool_call\":{\"shellToolCall\":{\"args\":{}}}}";
+          "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"DONE\"}]}}";
+          "{\"type\":\"result\",\"result\":\"Running it.DONE\"}";
+        ]);
+  Test.assert_equal
+    ~expected:"I'll run\n\nDONE"
+    ~actual:
+      (run
+        ~command:"grok"
+        [
+          "{\"type\":\"text\",\"data\":\"I'll\"}";
+          "{\"type\":\"text\",\"data\":\" run\"}";
+          "{\"type\":\"tool_call\",\"toolCallId\":\"x\",\"toolName\":\"t\",\"rawInput\":{}}";
+          "{\"type\":\"text\",\"data\":\"DONE\"}";
+        ]);
+  Test.assert_equal ~expected:"a\nb\n" ~actual:(run ~command:"opencode" [ "a"; ""; "b" ]);
+  Ok ()
+
+let test_steps_clip_utf8 = fun _ctx ->
+  Test.assert_equal ~expected:"你…" ~actual:(Steps.clip "你好" 4);
+  Test.assert_equal ~expected:"abc" ~actual:(Steps.clip "abc" 5);
+  Ok ()
+
+let test_feed_folds_events = fun _ctx ->
+  let feed = Feed.create () in
+  let ev type_ data = Feed.apply feed ~type_ ~request_id:"r1" (Json.obj data) in
+  let step agent s = ev "agent_step" [ ("agent", Json.string agent); ("step", s) ] in
+  ev "task_started" [ ("title", Json.string "fix the bug"); ("category", Json.string "coding"); ("source", Json.string "mcp") ];
+  ev
+    "routed"
+    [
+      ("mode", Json.string "agent");
+      ("chosen", Json.string "claude_code");
+      ("candidates", Json.array [ Json.obj [ ("name", Json.string "claude_code"); ("score", Json.int 90) ]; Json.obj [ ("name", Json.string "cursor_agent"); ("score", Json.int 80) ] ]);
+      ("rejected", Json.array [ Json.obj [ ("name", Json.string "kimi_cli"); ("reason", Json.string "circuit_open") ] ]);
+    ];
+  ev "attempt_started" [ ("account", Json.string "claude_code") ];
+  step "claude_code" (Steps.thinking ~delta:true "pla");
+  step "claude_code" (Steps.thinking ~delta:true "n");
+  step "claude_code" (Steps.tool ~id:"t1" ~name:"Bash" ~input:(Json.obj [ ("command", Json.string "ls") ]));
+  step "claude_code" (Steps.narration "DONE");
+  ev "task_done" [ ("chosen", Json.string "claude_code"); ("ok", Json.bool true) ];
+  match Feed.find feed "r1" with
+  | None -> Error "task not in feed"
+  | Some t ->
+      Test.assert_equal ~expected:"ok" ~actual:t.Feed.status;
+      Test.assert_equal ~expected:"claude_code" ~actual:t.Feed.executor;
+      Test.assert_equal ~expected:"mcp" ~actual:t.Feed.source;
+      Test.assert_equal ~expected:"DONE" ~actual:t.Feed.answer;
+      Test.assert_equal ~expected:true ~actual:(String.contains t.Feed.route_summary "claude_code");
+      Test.assert_equal ~expected:true ~actual:(String.contains t.Feed.route_summary "熔断");
+      (* route, attempt, merged thinking, tool, text, done *)
+      Test.assert_equal ~expected:6 ~actual:(List.length t.Feed.timeline);
+      let thinking =
+        List.find t.Feed.timeline ~fn:(fun e -> String.equal (sfield e "step") "thinking")
+      in
+      Test.assert_equal ~expected:(Some "plan") ~actual:(thinking |> Option.map ~fn:(fun e -> sfield e "text"));
+      Ok ()
+
 let test_agent_fit = fun _ctx ->
   let a = mk_agent ~tier:5 ~strengths:[ "coding" ] "x" in
   Test.assert_equal ~expected:100 ~actual:(Agent.fit a ~category:"coding");
@@ -1731,6 +1853,69 @@ let test_gateway_agent_non_stream_and_fallback = fun _ctx ->
         )
       )
   )
+
+let test_gateway_feed_records_agent_steps = fun _ctx ->
+  let config =
+    mk_config_agents
+      ~accounts:[ mk_account "acc_api" ]
+      ~agents:[ mk_agent ~command:(fix "claude") ~args:[ "{prompt}" ] "fake_claude" ]
+      ~kb:[ mk_kb_model "m-x" ]
+      ~routes:[]
+      ~max_fallback:0
+  in
+  match Gateway.start ~config_path:None ~config ~port:0 () with
+  | Error e -> Error ("gateway: " ^ e)
+  | Ok gw -> (
+      let body =
+        Json.to_string
+          (Json.obj
+            [
+              ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "列一下 /tmp") ] ]);
+              ("max_tokens", Json.int 64);
+            ])
+      in
+      match
+        gw_post
+          ~port:gw.port
+          ~path:"/v1/chat/completions"
+          ~headers:[ ("X-Oasis-Category", "coding"); ("Content-Type", "application/json"); ("X-Oasis-Source", "dashboard") ]
+          ~body
+      with
+      | Error e -> Error ("chat: " ^ e)
+      | Ok (status, resp) -> (
+          Test.assert_equal ~expected:200 ~actual:status;
+          Test.assert_equal ~expected:true ~actual:(String.contains resp "DONE");
+          Test.assert_equal ~expected:false ~actual:(String.contains resp "ls /tmp");
+          match gw_get ~port:gw.port ~path:"/api/feed" with
+          | Error e -> Error e
+          | Ok (_, feed_body) -> (
+              let id =
+                Json.from_string feed_body |> Result.to_option
+                |> Option.and_then ~fn:(Json.get_field "tasks")
+                |> Option.and_then ~fn:Json.get_array
+                |> Option.and_then ~fn:List.head
+                |> Option.and_then ~fn:(fun t -> Steps.str t "id")
+              in
+              match id with
+              | None -> Error ("no task in feed: " ^ feed_body)
+              | Some id -> (
+                  match gw_get ~port:gw.port ~path:("/api/feed/task?id=" ^ id) with
+                  | Error e -> Error e
+                  | Ok (_, task) -> (
+                      let missing =
+                        List.find
+                          [ "\"status\":\"ok\""; "\"source\":\"dashboard\""; "列一下 /tmp"; "\"step\":\"tool\""; "ls /tmp | head -3";
+                            "\"step\":\"tool_result\""; "\"step\":\"thinking\""; "\"kind\":\"attempt_end\"" ]
+                          ~fn:(fun needle -> not (String.contains task needle))
+                      in
+                      match missing with
+                      | Some needle -> Error ("feed task lacks " ^ needle ^ ": " ^ task)
+                      | None -> Ok ()
+                    )
+                )
+            )
+        )
+    )
 
 let test_gateway_agent_stream_and_explicit_chat = fun _ctx ->
   let kb = [ mk_kb_model "m-x" ] in
@@ -3226,6 +3411,31 @@ let test_agent_timeout_kills_process_tree = fun _ctx ->
           Ok ()
     )
 
+let test_agent_exit_reaps_lingering_helpers = fun _ctx ->
+  let cwd = Env.current_dir () |> Result.unwrap |> Path.to_string in
+  let script = cwd ^ "/packages/portal/tests/fixtures/agent_linger.sh" in
+  let a = mk_agent ~args:[ script ] ~timeout_s:60 "agent_linger" in
+  let me = self () in
+  let t0 = Time.Instant.now () in
+  let _ =
+    Runtime.spawn_blocked (fun () ->
+      let res = Agent.collect ~agent:a ~model:"" ~prompt:"" () in
+      send me (Agent_collect_done res);
+      Ok ())
+  in
+  let selector msg =
+    match msg with
+    | Agent_collect_done r -> Select r
+    | _ -> Skip
+  in
+  match receive ~selector ~timeout:(Time.Duration.from_secs 20) () with
+  | exception Receive_timeout -> Error "collect blocked on a stdout pipe held by a lingering helper"
+  | Error e -> Error ("expected success: " ^ e)
+  | Ok text ->
+      Test.assert_equal ~expected:"answer from lingering agent\n" ~actual:text;
+      Test.assert_equal ~expected:true ~actual:(Time.Duration.to_millis (Time.Instant.elapsed t0) < 10000);
+      Ok ()
+
 let tests =
   Test.[
     case "chunked decoding: single chunk" test_chunked_single_chunk;
@@ -3268,6 +3478,12 @@ let tests =
     case "agent: args template" test_agent_build_args;
     case "agent: claude stream-json parse" test_agent_claude_stream_json_parse;
     case "agent: cursor stream-json parse" test_agent_cursor_stream_json_parse;
+    case "steps: parse claude/cursor/gemini/kimi/grok events" test_steps_parse_agents;
+    case "steps: answer joins messages and post-tool text" test_steps_answer_join;
+    case "steps: clip keeps utf-8 valid" test_steps_clip_utf8;
+    case ~size:Test.Large "agent: exit reaps helpers that keep stdout open" test_agent_exit_reaps_lingering_helpers;
+    case "feed: folds events into one task record" test_feed_folds_events;
+    case ~size:Test.Large "feed: gateway records agent work steps" test_gateway_feed_records_agent_steps;
     case ~size:Test.Large "agent: watchdog timeout kills the whole process tree" test_agent_timeout_kills_process_tree;
     case "gateway: connect_ip overrides DNS" test_gateway_connect_ip_overrides_dns;
     case "stream: finish_reason then EOF without [DONE] is a clean end" test_stream_finish_reason_without_done;

@@ -77,23 +77,29 @@ let assistant_text = fun j ->
     )
 
 (** [extract_text ~command line] pulls the visible assistant text from one
-    line of agent stdout. Claude Code's and Cursor's stream-json lines are
-    parsed; other agents are treated as plain text. Returns None for lines
-    that carry no user-visible text (tool events, json bookkeeping). *)
+    line of agent stdout. Json event lines of known agent CLIs are parsed
+    (Portal_steps); other output is plain text. Returns None for lines that
+    carry no user-visible text (tool events, json bookkeeping, the final
+    [result] line that repeats every assistant segment). *)
 let extract_text = fun ~command (line : string) ->
-  if String.equal command "claude" || String.equal command "cursor-agent" then (
-    (* the final [result] line repeats every assistant segment *)
-    match Json.from_string line with
-    | Error _ -> None
-    | Ok j -> (
-        match Json.get_field "type" j |> Option.and_then ~fn:Json.get_string with
-        | Some "assistant" -> assistant_text j
-        | _ -> None
-      )
-  ) else
-    (* opencode / gemini / codex: plain text lines *)
-    if String.is_empty (String.trim line) then None
-    else Some (line ^ "\n")
+  match Portal_steps.parse ~command line with
+  | Some steps -> (
+      match Portal_steps.answer_piece (Portal_steps.joiner ()) steps with
+      | "" -> None
+      | t -> Some t
+    )
+  | None ->
+      if String.is_empty (String.trim line) then None
+      else Some (line ^ "\n")
+
+(** Stateful variant for whole runs: returns the answer text one line adds
+    (separators included) and the work steps it carries. *)
+let consume_line = fun (jn : Portal_steps.joiner) ~command (line : string) ->
+  match Portal_steps.parse ~command line with
+  | Some steps -> (Portal_steps.answer_piece jn steps, steps)
+  | None ->
+      if String.is_empty (String.trim line) then ("", [])
+      else (line ^ "\n", [])
 
 (* ---------- workdir / env sandboxing (spec §5.2) ---------- *)
 
@@ -159,6 +165,20 @@ let child_env = fun (a : agent) ->
 (** Runs [agent.command] under [env -i] so the child sees only
     [child_env]: [Process.spawn ~env] would merge into the gateway's own
     environment, which holds every upstream API key. *)
+let group_leader_script =
+  {|setpgrp(0, 0);
+my $pid = fork();
+exit 127 unless defined $pid;
+if ($pid == 0) { exec { $ARGV[0] } @ARGV or exit 127 }
+waitpid($pid, 0);
+my $st = $?;
+if (open(my $ps, '-|', '/bin/ps', '-A', '-o', 'pid=,pgid=')) {
+  my @rest = map { $_->[0] } grep { $_->[1] == $$ && $_->[0] != $$ } map { [split ' '] } <$ps>;
+  close($ps);
+  kill 'KILL', @rest if @rest;
+}
+exit($st & 127 ? 128 + ($st & 127) : $st >> 8);|}
+
 let spawn_proc = fun ~(agent : agent) ~args () ->
   let stdio =
     {
@@ -172,10 +192,12 @@ let spawn_proc = fun ~(agent : agent) ~args () ->
     else Some (Path.from_string agent.workdir |> Result.unwrap)
   in
   let env_args = List.map (child_env agent) ~fn:(fun (k, v) -> k ^ "=" ^ v) in
-  (* perl makes the agent a process-group leader so the watchdog can kill
-     the whole tree: CLIs such as gemini re-exec into a child node process
-     that outlives a SIGKILL of the parent *)
-  let group_leader = [ "/usr/bin/perl"; "-e"; "setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127"; "--" ] in
+  (* perl leads a fresh process group so the watchdog can kill the whole
+     tree (gemini re-execs into a node child that outlives a SIGKILL of the
+     parent). It also reaps the group once the agent exits: helpers such as
+     cursor-agent's daemonized worker-server inherit stdout, and a pipe
+     held open by them would block the reader forever. *)
+  let group_leader = [ "/usr/bin/perl"; "-e"; group_leader_script; "--" ] in
   let argv = ("-i" :: env_args) @ group_leader @ (agent.command :: Array.to_list args) in
   let args = Array.init ~count:(List.length argv) ~fn:(fun i -> List.get_unchecked argv ~at:i) in
   Process.spawn ~program:"env" ~args ?current_dir:workdir ~stdio ()
@@ -271,8 +293,9 @@ let exit_code = fun ~proc ->
   | Ok (Some (Process.Signaled s)) -> 128 + s
   | _ -> -1
 
-(** Synchronous collection; call ONLY from a blocking lane. *)
-let collect = fun ~(agent : agent) ~model ~prompt () ->
+(** Synchronous collection; call ONLY from a blocking lane. [on_line] sees
+    every raw stdout line (for step extraction by the caller). *)
+let collect = fun ?(on_line = fun (_ : string) -> ()) ~(agent : agent) ~model ~prompt () ->
   let args =
     let arg_list = build_args agent ~model ~prompt in
     Array.init ~count:(List.length arg_list) ~fn:(fun i -> List.get_unchecked arg_list ~at:i)
@@ -282,8 +305,12 @@ let collect = fun ~(agent : agent) ~model ~prompt () ->
   | Ok proc ->
       let _ = watchdog ~proc ~timeout_s:agent.timeout_s ~to_pid:(self ()) ~leg:0 in
       let buf = ref "" in
+      let jn = Portal_steps.joiner () in
+      let observe = on_line in
       let on_line line =
-        buf := !buf ^ (extract_text ~command:agent.command line |> Option.unwrap_or ~default:"")
+        observe line;
+        let text, _ = consume_line jn ~command:agent.command line in
+        buf := !buf ^ text
       in
       drain_proc ~proc ~on_line ();
       let code = exit_code ~proc in

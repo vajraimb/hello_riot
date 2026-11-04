@@ -22,6 +22,7 @@ let broadcast_json = fun (state : state) (payload : Json.t) ->
     ())
 
 let broadcast_event = fun (state : state) ~(type_ : string) ~(request_id : string) ~(data : Json.t) ->
+  Portal_feed.apply state.feed ~type_ ~request_id data;
   broadcast_json
     state
     (Json.obj
@@ -75,18 +76,43 @@ let emit_attempt_finished = fun (state : state) ~(request_id : string) ~(account
            | Some e -> [ ("error", Json.string e) ]
            | None -> [])))
 
-let emit_task_done = fun (state : state) ~(request_id : string) ~(chosen : string option) ~(attempts : int) ~(ok : bool) ->
+let emit_task_done = fun ?(error = "") (state : state) ~(request_id : string) ~(chosen : string option) ~(attempts : int) ~(ok : bool) ->
   broadcast_event
     state
     ~type_:"task_done"
     ~request_id
     ~data:
       (Json.obj
-        [
-          ("chosen", Json.string (chosen |> Option.unwrap_or ~default:"none"));
-          ("attempts", Json.int attempts);
-          ("ok", Json.bool ok);
-        ])
+        ([
+           ("chosen", Json.string (chosen |> Option.unwrap_or ~default:"none"));
+           ("attempts", Json.int attempts);
+           ("ok", Json.bool ok);
+         ]
+        @ (if String.is_empty error then [] else [ ("error", Json.string (Portal_signals.redact_secrets error)) ])))
+
+let redact_step = fun (step : Json.t) ->
+  match step with
+  | Json.Object fields ->
+      Json.obj
+        (List.map fields ~fn:(fun (k, v) ->
+          match v with
+          | Json.String s -> (k, Json.string (Portal_signals.redact_secrets s))
+          | _ -> (k, v)))
+  | j -> j
+
+let emit_agent_step = fun (state : state) ~(request_id : string) ~(agent : string) (step : Json.t) ->
+  broadcast_event
+    state
+    ~type_:"agent_step"
+    ~request_id
+    ~data:(Json.obj [ ("agent", Json.string agent); ("step", redact_step step) ])
+
+(** Raw-stdout-line observer that publishes the line's work steps. *)
+let agent_step_observer = fun (state : state) ~(request_id : string) ~(agent : string) ~(command : string) ->
+  fun (line : string) ->
+    match Portal_steps.parse ~command line with
+    | Some steps -> List.for_each steps ~fn:(emit_agent_step state ~request_id ~agent)
+    | None -> ()
 
 let write_stream = fun stream payload ->
   let buf = IO.Bytes.from_string payload in

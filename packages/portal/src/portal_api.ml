@@ -92,6 +92,7 @@ let handle_list_accounts = fun (state : state) (ctx : Trail.ctx) ->
                 Json.string "unlimited"
             );
             ("latency_ema_ms", Json.int s.Portal_signals.latency_ema_ms);
+            ("total_requests", Json.int s.Portal_signals.total_requests);
             ("in_flight", Json.int s.Portal_signals.in_flight);
             ("breaker", Json.string breaker_str);
             ("requests_in_window", Json.int s.Portal_signals.requests_in_window);
@@ -173,10 +174,62 @@ let discover_home = fun (state : state) ->
 let handle_list_agents = fun (state : state) (ctx : Trail.ctx) ->
   let home = discover_home state in
   let statuses = Portal_discover.scan ~home in
+  let config = Sync.Atomic.get state.config in
+  let configured =
+    List.map config.Portal_config.agents ~fn:(fun a ->
+      let s = Portal_signals.get state.signals a.Portal_agent.name in
+      Json.obj
+        [
+          ("name", Json.string a.Portal_agent.name);
+          ("command", Json.string a.Portal_agent.command);
+          ("enabled", Json.bool a.Portal_agent.enabled);
+          ("tier", Json.int a.Portal_agent.tier);
+          ("strengths", Json.array (List.map a.Portal_agent.strengths ~fn:Json.string));
+          ("latency_ema_ms", Json.int s.Portal_signals.latency_ema_ms);
+          ("in_flight", Json.int s.Portal_signals.in_flight);
+          ("total_requests", Json.int s.Portal_signals.total_requests);
+          ("consecutive_failures", Json.int s.Portal_signals.consecutive_failures);
+          (
+            "breaker",
+            Json.string
+              (match s.Portal_signals.breaker with
+               | Portal_signals.Closed -> "closed"
+               | Portal_signals.Half_open -> "half_open"
+               | Portal_signals.Open_until _ -> "open")
+          );
+          ("last_error", match s.Portal_signals.last_error with Some e -> Json.string e | None -> Json.null);
+        ])
+  in
   Trail.json
     ctx
     (Json.obj
-      [ ("agents", Json.array (List.map statuses ~fn:Portal_discover.status_json)) ])
+      [
+        ("agents", Json.array (List.map statuses ~fn:Portal_discover.status_json));
+        ("configured", Json.array configured);
+      ])
+
+let handle_list_feed = fun (state : state) (ctx : Trail.ctx) ->
+  let limit =
+    query_param ctx "limit" |> Option.and_then ~fn:Int.from_string_opt
+    |> Option.unwrap_or ~default:100 |> max 1 |> min Portal_feed.keep
+  in
+  Trail.json
+    ctx
+    (Json.obj
+      [ ("tasks", Json.array (List.map (Portal_feed.recent state.feed ~limit) ~fn:Portal_feed.summary_json)) ])
+
+let handle_feed_task = fun (state : state) (ctx : Trail.ctx) ->
+  match query_param ctx "id" |> Option.and_then ~fn:(Portal_feed.find state.feed) with
+  | Some t -> Trail.json ctx (Portal_feed.detail_json t)
+  | None ->
+      Trail.json
+        ~status:Net.Http.Status.NotFound
+        ctx
+        (Json.obj [ ("error", Json.string "unknown task (the feed keeps the newest tasks in memory only)") ])
+
+let handle_list_alerts = fun (state : state) (ctx : Trail.ctx) ->
+  let alerts = Portal_alerts.collect state ~home:(discover_home state) in
+  Trail.json ctx (Json.obj [ ("alerts", Json.array (List.map alerts ~fn:Portal_alerts.alert_json)) ])
 
 let handle_reload = fun (state : state) (ctx : Trail.ctx) ->
   match state.config_path with

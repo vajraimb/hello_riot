@@ -151,10 +151,14 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 - **流式（账户）**：导体 actor 管理当前 leg；上游断流/错误 → 触发 handoff（§3）。
   正常结束 = `data: [DONE]`，或收到非空 `finish_reason` 后上游关闭（Perplexity 不发 `[DONE]`）；
   两者都没有就关闭视为断流
-- **流式（agent）**：子进程 stdout 逐行 → 文本提取（claude / cursor-agent stream-json 只取 `assistant`
-  文本，末尾 `result` 是全文重复，丢弃；思考不外泄）→
-  客户端 delta；心跳保活（10s 空 chunk）；看门狗 SIGKILL 兜底（子进程经 perl `setpgrp` 成为进程组组长，
-  超时杀整个进程组——gemini 等 CLI 会 re-exec 出子 node 进程，只杀父进程会留下孤儿）
+- **流式（agent）**：子进程 stdout 逐行 → `Portal_steps.parse` 把 claude / cursor-agent / gemini / kimi / grok
+  的 JSON 事件流解析成工作步骤（`thinking` / `text` / `tool` / `tool_result` / `usage`），非 JSON 行与未知 CLI
+  按纯文本处理。只有 `text` 进入客户端 delta（末尾 `result` 是全文重复，丢弃；整条消息之间、工具调用后续写的
+  文字之间插空行）；思考与工具步骤**不进回答**，作为 `agent_step` 事件广播给控制台（§2.6）。
+  心跳保活（10s 空 chunk）；看门狗 SIGKILL 兜底：子进程由 perl 包装成为进程组组长，超时杀整个进程组
+  （gemini 等 CLI 会 re-exec 出子 node 进程，只杀父进程会留下孤儿）。perl 包装在 agent 退出后**清理同组残留进程**
+  再以 agent 的退出码退出——cursor-agent 会留下继承了 stdout 的后台 worker-server，不清理则管道永不 EOF，
+  任务永远"进行中"。调用方中途断开时任务以失败结束（`task_done.error` 说明结果未送达）
 - **异步任务**（MCP agent 任务默认）：秒回 task_id → `oasis_task_status` 轮询
   running/done/failed——解决"MCP 客户端超时 < agent 执行时长"的矛盾
 
@@ -176,16 +180,35 @@ daily 语义）是**每 30s 烧一次请求并污染时延 EMA**。0.3 区分三
 
 | 接口 | 说明 |
 |---|---|
-| `POST /v1/chat/completions` | OpenAI 兼容（流式 SSE / 非流式）；头 `X-Oasis-Category` `X-Oasis-Goal` `X-Oasis-Mode` `X-Oasis-Session` |
+| `POST /v1/chat/completions` | OpenAI 兼容（流式 SSE / 非流式）；头 `X-Oasis-Category` `X-Oasis-Goal` `X-Oasis-Mode` `X-Oasis-Session`；可选 `X-Oasis-Source`（来源标签，默认 `api`）、`X-Oasis-Client-Ref`（原样回显在 `task_started`，供控制台关联自己发起的请求） |
 | `GET /v1/models` | KB 模型列表 |
 | `POST /mcp` | MCP（JSON-RPC 2.0 / Streamable HTTP 简化）11 工具：oasis_ask、oasis_agent_task、oasis_task_status、oasis_status、oasis_decisions、oasis_send_message、oasis_check_inbox、oasis_ask_user、oasis_activity、oasis_agents、oasis_models |
-| `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点）、activity（时间线）、requests（审计） |
-| `WS /ws` | 实时推送：decision + 事件流（task_started → routed → attempt_started → attempt_finished → **[0.3 新增]** handoff → task_done）驱动前端过程图 |
-| `GET /` | Dashboard：ask 面板 + 账户状态 + 决策流 + Cortex 风格过程图 + agent 盘点 + 活动时间线 + 收件箱 |
+| `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点 + 已配置 agent 的信号）、activity（时间线）、requests（审计）、**feed**（最近任务摘要）、**feed/task?id=**（单任务：路由说明 + 时间线 + 回答）、**alerts**（需要处理的问题 + 可复制的修复命令） |
+| `WS /ws` | 实时推送：decision + 事件流（task_started → routed → attempt_started → attempt_finished → **[0.3 新增]** handoff → task_done，以及 agent 的 `agent_step`） |
+| `GET /` | 控制台（§2.6）：工作台（任务列表 / 任务详情 / 需要你处理 + 资源）与诊断页（账户明细、原始决策、过程图、agent 盘点、会话活动、收件箱） |
 
 **[0.3 新增]** 所有非 `GET /` 与非静态资源的接口受 §5 的鉴权约束。
 
-### 2.6 前端过程图
+### 2.6 控制台与任务流
+
+`Portal_feed` 在 `broadcast_event` 处把每个事件折叠进按 `request_id` 的任务记录（内存，保留最近 200 条，
+重启清空）：标题（最后一条 user 消息，折叠空白）、来源（api / mcp / dashboard）、执行者、状态、时间线、
+agent 回答文字。路由说明与切换说明在服务端生成人话（"交给 agent X：编程任务里适配分最高（200）；备选…；
+排除 Y（熔断中）"；handoff 按 G1/G2/G3 说明是无缝续写、去重续写还是重新生成），错误串翻译成可行动的
+原因（认证失败 / 被限流 / 连接或 DNS 问题 / 进程异常退出…），原文保留在旁边。
+
+- 账户路径、chat-agent 路径（同步与流式）和 MCP agent 任务（同步与异步）**都**发完整事件链；
+  任何提前返回（无候选、tools 无兼容账户、调用方断开）都发 `task_done`，任务不会停在"进行中"
+- `agent_step` = `{agent, step}`，step 字符串字段经 `redact_secrets`；token 级增量（`delta`）在任务流里并入
+  同 agent 同类的上一步
+- `/api/alerts` 来源：启用账户缺环境变量 key、`auth_invalid`、配额停牌、熔断；启用 agent 的 CLI 未安装 /
+  未登录、连续失败。每条带 `fix`（如 `export KEY=…`、`cursor-agent login`、`dig +short host @1.1.1.1`）
+- 问答类请求的回答正文**不进**任务流（只回给调用方；控制台自己发起的请求在浏览器本地显示）；
+  agent 的说明文字作为步骤进入任务流
+- 控制台不是聊天布局：输入栏 + 三栏（任务列表 / 详情：路由说明、执行过程时间线、输出 / 需要你处理 + 资源），
+  键盘 `/` 输入、`⌘↵` 运行、`j` `k` 切换任务、`1` `2` 切换详情页签
+
+#### 2.6.1 诊断页过程图
 
 事件驱动的 SVG 过程图（rank 分层、S 曲线边、回退回环、发光节点，零外部依赖）。
 视觉细节（曲线偏移像素、渐变色值等）从 spec 移出，归入 `docs/ai-portal-plan.md` §16.25。

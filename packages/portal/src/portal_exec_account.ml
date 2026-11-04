@@ -287,6 +287,9 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
         [
           ("category", Json.string category);
           ("goal", Json.string goal_str);
+          ("title", Json.string (Portal_feed.title_of_body body));
+          ("source", Json.string (get_header ctx "x-oasis-source" |> Option.unwrap_or ~default:"api"));
+          ("client_ref", Json.string (get_header ctx "x-oasis-client-ref" |> Option.unwrap_or ~default:""));
           (
             "stream",
             Json.bool (Json.get_field "stream" body |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false)
@@ -395,6 +398,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
   );
   if List.is_empty candidates && not (List.is_empty routable) then (
     record_decision state decision;
+    emit_task_done ~error:"请求带了 tools 等参数，但没有可用的 openai 协议账户" state ~request_id ~chosen:None ~attempts:0 ~ok:false;
     Trail.json
       ~status:Net.Http.Status.BadRequest
       ctx
@@ -410,6 +414,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
         ])
   ) else if List.is_empty candidates then (
     record_decision state decision;
+    emit_task_done ~error:"没有可用的账户（见路由说明里的排除原因）" state ~request_id ~chosen:None ~attempts:0 ~ok:false;
     Trail.json
       ~status:Net.Http.Status.PaymentRequired
       ctx

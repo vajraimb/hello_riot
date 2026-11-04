@@ -27,6 +27,7 @@ type state = {
   ws_clients: (int, Net.TcpStream.t) ConcurrentHashMap.t;
   decision_history: Json.t list Sync.Atomic.t;
   decisions_appended: int Sync.Atomic.t;
+  feed: Portal_feed.t;
 }
 
 (* ---------- helpers ---------- *)

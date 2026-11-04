@@ -111,8 +111,9 @@ let find_agent = fun (config : Portal_config.t) name ->
 type Message.t +=
   | Agent_call_result of (string, string) result
 
-let blocking_agent_call = fun ~agent ~model ~prompt ->
+let blocking_agent_call = fun ?on_line ~agent ~model ~prompt ->
   Portal_agent_worker.run_task
+    ?on_line
     ~name:agent.Portal_agent.name
     ~agent
     ~model
@@ -199,6 +200,7 @@ let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(
   in
   if List.is_empty candidates then (
     record_decision state decision;
+    emit_task_done ~error:"没有可用的 agent（见路由说明里的排除原因）" state ~request_id ~chosen:None ~attempts:0 ~ok:false;
     Trail.json
       ~status:Net.Http.Status.PaymentRequired
       ctx
@@ -215,12 +217,14 @@ let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(
       let attempts = ref [] in
       let current = ref "" in
       let t0 = ref (Time.Instant.now ()) in
+      let joiner = Portal_steps.joiner () in
       let rec start_agent () =
         match !candidates_left with
         | [] -> false
         | nm :: rest -> (
             candidates_left := rest;
             current := nm;
+            joiner.Portal_steps.broke <- true;
             t0 := Time.Instant.now ();
             match find_agent config nm with
             | None ->
@@ -366,11 +370,20 @@ let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(
                     ("chosen", Json.string "none");
                     ("attempts", Json.int (List.length !attempts));
                     ("ok", Json.bool false);
+                    ("error", Json.string ("所有 agent 都失败了，最后一个：" ^ reason));
                   ]);
             let _ = write_stream client_stream "data: [DONE]\n\n" in
             send (self ()) (Conductor_done (Ok ()));
             false
           )
+        in
+        let client_gone e =
+          finished := true;
+          release_slot ();
+          emit_task_done
+            ~error:("调用方断开了连接，结果未送达（" ^ !current ^ " 仍可能在后台跑完）")
+            state ~request_id ~chosen:None ~attempts:(List.length !attempts + 1) ~ok:false;
+          send (self ()) (Conductor_done (Error e))
         in
         let _ = start_agent () in
         let rec loop () =
@@ -384,23 +397,23 @@ let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(
             in
             match receive ~selector ~timeout:(Time.Duration.from_secs 10) () with
             | `Line line -> (
-                match
-                  Portal_agent.extract_text
+                let text, steps =
+                  Portal_agent.consume_line
+                    joiner
                     ~command:(match find_agent config !current with Some a -> a.Portal_agent.command | None -> "")
                     line
-                with
-                | None -> loop ()
-                | Some text ->
+                in
+                List.for_each steps ~fn:(emit_agent_step state ~request_id ~agent:!current);
+                match text with
+                | "" -> loop ()
+                | text ->
                     sent := !sent ^ text;
                     (match
                       write_stream
                         client_stream
                         ("data: " ^ Json.to_string (delta_chunk_json text) ^ "\n\n")
                     with
-                    | Error e ->
-                        finished := true;
-                        release_slot ();
-                        send (self ()) (Conductor_done (Error e))
+                    | Error e -> client_gone e
                     | Ok () -> loop ()
                 )
               )
@@ -424,10 +437,7 @@ let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(
                     client_stream
                     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":null}]}\n\n"
                 with
-                | Error e ->
-                    finished := true;
-                    release_slot ();
-                    send (self ()) (Conductor_done (Error e))
+                | Error e -> client_gone e
                 | Ok () -> loop ()
                 )
           )
@@ -442,6 +452,9 @@ let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(
         | [] ->
             let decision' = { decision with Portal_router.attempts = List.rev acc } in
             record_decision state decision';
+            emit_task_done
+              ~error:(match acc with a :: _ -> "所有 agent 都失败了，最后一个：" ^ (a.Portal_router.error |> Option.unwrap_or ~default:"?") | [] -> "")
+              state ~request_id ~chosen:None ~attempts:(List.length acc) ~ok:false;
             Trail.json
               ~status:Net.Http.Status.BadGateway
               ctx
@@ -466,8 +479,19 @@ let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(
                   Portal_signals.update state.signals nm ~fn:Portal_signals.mark_in_flight
                 in
                 let t0 = Time.Instant.now () in
-                let result = blocking_agent_call ~agent ~model:model_for ~prompt:prompt0 in
+                emit_attempt_started state ~request_id ~account:nm;
+                let on_line =
+                  agent_step_observer state ~request_id ~agent:nm ~command:agent.Portal_agent.command
+                in
+                let result = blocking_agent_call ~on_line ~agent ~model:model_for ~prompt:prompt0 in
                 let latency_ms = Time.Duration.to_millis (Time.Instant.elapsed t0) in
+                emit_attempt_finished
+                  state
+                  ~request_id
+                  ~account:nm
+                  ~status:(match result with Ok _ -> Some 200 | Error _ -> None)
+                  ~error:(match result with Ok _ -> None | Error e -> Some e)
+                  ~latency_ms;
                 (
                   match result with
                   | Ok text ->
@@ -475,6 +499,7 @@ let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(
                         Portal_signals.update state.signals nm ~fn:(fun s ->
                           Portal_signals.record_success s ~latency_ms ~tokens:(String.length text / 4) (Portal_signals.now_ms ()))
                       in
+                      emit_task_done state ~request_id ~chosen:(Some nm) ~attempts:(List.length acc + 1) ~ok:true;
                       let attempt =
                         { Portal_router.account = nm; model = nm; status = Some 200; error = None; latency_ms; cost_nano = 0 }
                       in
