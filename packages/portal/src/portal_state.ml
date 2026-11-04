@@ -14,6 +14,7 @@ type Message.t +=
   | Upstream_head of int * int * string
   | Upstream_ended of int
   | Conductor_done of (unit, string) result
+  | Committee_answer of int * (string * int, string) result
 
 type state = {
   config_path: string option;

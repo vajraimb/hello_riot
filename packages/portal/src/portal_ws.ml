@@ -35,7 +35,7 @@ let broadcast_event = fun (state : state) ~(type_ : string) ~(request_id : strin
         ("data", data);
       ])
 
-let emit_routed = fun (state : state) ~(request_id : string) ~(mode : string) (d : Portal_router.decision) ->
+let emit_routed = fun ?(pinned = false) (state : state) ~(request_id : string) ~(mode : string) (d : Portal_router.decision) ->
   broadcast_event
     state
     ~type_:"routed"
@@ -45,6 +45,7 @@ let emit_routed = fun (state : state) ~(request_id : string) ~(mode : string) (d
         [
           ("mode", Json.string mode);
           ("explored", Json.bool d.Portal_router.explored);
+          ("pinned", Json.bool pinned);
           ("chosen", d.Portal_router.chosen |> Option.map ~fn:Json.string |> Option.unwrap_or ~default:Json.null);
           (
             "candidates",

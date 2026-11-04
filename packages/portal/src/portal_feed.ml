@@ -236,8 +236,10 @@ let route_summary_of = fun ~goal ~category (data : Json.t) ->
   | None -> "没有可用的执行者" ^ reject_txt
   | Some c ->
       let explored = Json.get_field "explored" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
+      let pinned = Json.get_field "pinned" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
       let why =
-        if explored then "探索轮（每 10 次请求试 1 次记录少的候选，失败会回到常规首选）"
+        if pinned then "你指定了这个 agent（不探索、不替换）"
+        else if explored then "探索轮（每 10 次请求试 1 次记录少的候选，失败会回到常规首选）"
         else if String.equal mode "agent" then
           category_text category ^ "任务里这个 agent 的适配分最高"
         else "按「" ^ goal_text goal ^ "」目标综合评分最高"
@@ -252,7 +254,14 @@ let route_summary_of = fun ~goal ~category (data : Json.t) ->
         | (Some s, None) -> "（" ^ Int.to_string s ^ "）"
         | _ -> ""
       in
-      (if String.equal mode "agent" then "交给 agent " else "选用账户 ") ^ c ^ "：" ^ why ^ score ^ "；" ^ backup_txt ^ reject_txt
+      let lead =
+        match mode with
+        | "agent" -> "交给 agent "
+        | "committee" -> "汇总交给 "
+        | _ -> "选用账户 "
+      in
+      let backup_txt = if pinned then "没有备选" else backup_txt in
+      lead ^ c ^ "：" ^ why ^ score ^ "；" ^ backup_txt ^ reject_txt
 
 (** Why the category is what it is, when Oasis inferred it. *)
 let category_note_of = fun (data : Json.t) ->
@@ -397,6 +406,25 @@ let apply_event = fun (t : task) ~type_ (data : Json.t) ->
           error;
         }
         (entry "done" [ ("ok", Json.bool ok); ("error", Json.string error) ])
+  | "committee_started" ->
+      let members =
+        Json.get_field "members" data |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
+        |> List.filter_map ~fn:Json.get_string
+      in
+      let text = "委员会：" ^ String.concat "、" members ^ " 并行作答，都答完后由路由器选一个模型汇总" in
+      let note = if String.is_empty t.category_note then text else t.category_note ^ "；" ^ text in
+      push { t with mode = "committee"; category_note = note; route_summary = note } (entry "route" [ ("text", Json.string text) ])
+  | "committee_member" ->
+      let acc = str data "account" |> Option.unwrap_or ~default:"?" in
+      let ok = Json.get_field "ok" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
+      push t
+        (entry "member"
+          ([ ("account", Json.string acc); ("ok", Json.bool ok); ("latency_ms", Json.int (int_field data "latency_ms" |> Option.unwrap_or ~default:0)) ]
+          @
+          if ok then [ ("text", Json.string (Portal_steps.clip (str data "text" |> Option.unwrap_or ~default:"") 20000)) ]
+          else
+            let e = str data "error" |> Option.unwrap_or ~default:"" in
+            [ ("error", Json.string e); ("hint", Json.string (error_text e)) ]))
   | "task_rated" -> (
       match str data "by" with
       | Some "user" ->

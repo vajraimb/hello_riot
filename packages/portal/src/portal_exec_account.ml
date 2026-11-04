@@ -325,8 +325,18 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
       est_out_tokens = max_tokens |> Option.unwrap_or ~default:1024;
     }
   in
+  let pinned_agent =
+    get_header ctx "x-oasis-agent" |> Option.map ~fn:String.trim |> Option.and_then ~fn:(fun a -> if String.is_empty a then None else Some a)
+  in
+  let committee =
+    get_header ctx "x-oasis-committee" |> Option.map ~fn:Portal_committee.parse_members |> Option.unwrap_or ~default:[]
+  in
+  if not (List.is_empty committee) then
+    Portal_committee.handle state ctx body ~members:committee ~category ~goal ~request_id
+  else
   let mode =
     match get_header ctx "x-oasis-mode" with
+    | _ when Option.is_some pinned_agent -> `Agent
     | Some "agent" -> `Agent
     | Some "chat" -> `Chat
     | _ ->
@@ -346,7 +356,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
     && not (List.is_empty config.Portal_config.agents)
   in
   if use_agent then
-    handle_chat_agent state ctx body ~category ~stream_requested ~request_id
+    handle_chat_agent ?pinned:pinned_agent state ctx body ~category ~stream_requested ~request_id
   else
   let decision =
     Portal_router.route_scored

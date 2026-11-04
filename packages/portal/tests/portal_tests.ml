@@ -3228,6 +3228,57 @@ let test_gateway_rating_feeds_routing = fun _ctx ->
         )
     )
 
+let test_committee_members_and_feed = fun _ctx ->
+  Test.assert_equal ~expected:[ "a"; "b" ] ~actual:(Portal.Committee.parse_members " a, b,a ,");
+  let feed = Feed.create () in
+  let ev type_ data = Feed.apply feed ~type_ ~request_id:"r1" (Json.obj data) in
+  ev "task_started" [ ("title", Json.string "q") ];
+  ev "committee_started" [ ("members", Json.array [ Json.string "a"; Json.string "b" ]) ];
+  ev "committee_member" [ ("account", Json.string "a"); ("ok", Json.bool true); ("text", Json.string "A says") ];
+  ev "committee_member" [ ("account", Json.string "b"); ("ok", Json.bool false); ("error", Json.string "upstream timeout (240s)") ];
+  ev "routed" [ ("mode", Json.string "committee"); ("chosen", Json.string "c"); ("candidates", Json.array []) ];
+  match Feed.find feed "r1" with
+  | None -> Error "missing"
+  | Some t ->
+      Test.assert_equal ~expected:"committee" ~actual:t.Feed.mode;
+      Test.assert_equal ~expected:true ~actual:(String.contains t.Feed.route_summary "委员会：a、b");
+      Test.assert_equal ~expected:true ~actual:(String.contains t.Feed.route_summary "汇总交给 c");
+      Test.assert_equal ~expected:2 ~actual:(List.length (List.filter t.Feed.timeline ~fn:(fun e -> String.equal (sfield e "kind") "member")));
+      Ok ()
+
+let test_gateway_committee = fun _ctx ->
+  match start_mocks 3 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      List.enumerate mocks
+      |> List.for_each ~fn:(fun (i, m) ->
+        Mock.set_scenario m { (Mock.default_scenario) with body = openai_ok_body ~content:("answer-" ^ Int.to_string i) });
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let body =
+            Json.to_string
+              (Json.obj [ ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "q") ] ]) ])
+          in
+          let post members =
+            gw_post ~port:gw.port ~path:"/v1/chat/completions"
+              ~headers:[ ("Content-Type", "application/json"); ("X-Oasis-Committee", members) ] ~body
+          in
+          match post "acc_0, acc_1" with
+          | Error e -> Error e
+          | Ok (status, resp) -> (
+              Test.assert_equal ~expected:200 ~actual:status;
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "汇总（");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "## acc_0\\n\\nanswer-0");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "## acc_1\\n\\nanswer-1");
+              match post "acc_0" with
+              | Error e -> Error e
+              | Ok (status2, _) ->
+                  Test.assert_equal ~expected:400 ~actual:status2;
+                  Ok ())
+        )
+    )
+
 let test_upstream_body_max_tokens_passthrough = fun _ctx ->
   let messages = Json.array [] in
   let has_max b = String.contains b "max_tokens" in
@@ -3755,6 +3806,8 @@ let tests =
     case "router: best goal avoids a very slow account" test_router_best_avoids_very_slow;
     case "upstream: max_tokens only when the client sets it" test_upstream_body_max_tokens_passthrough;
     case "quality: ratings blend into fit" test_quality_blend;
+    case "committee: members and feed events" test_committee_members_and_feed;
+    case "gateway: committee answers and synthesis" test_gateway_committee;
     case "router: exploration promotes the least-measured" test_router_explore;
     case "judge: verdict and spec parsing" test_judge_parse;
     case "feed: ratings, review and final answer" test_feed_ratings_and_answer;

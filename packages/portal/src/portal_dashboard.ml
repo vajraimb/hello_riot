@@ -52,10 +52,26 @@ select{background:var(--bg);border:1px solid var(--line2);border-radius:6px;padd
 kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid var(--line2);border-bottom-width:2px;border-radius:4px;padding:0 4px;margin-left:6px}
 
 /* workspace */
-.work{flex:1;display:grid;grid-template-columns:320px minmax(0,1fr) 340px;min-height:0}
+.work{--lw:320px;--rw:340px;flex:1;display:grid;grid-template-columns:var(--lw) minmax(0,1fr) var(--rw);min-height:0}
+.work > .col.list{grid-column:1;position:relative}
+.work > #detail{grid-column:2}
+.work > .col.rail{grid-column:3}
+.work.list-off{grid-template-columns:0 minmax(0,1fr) var(--rw)}
+.work.list-off > .col.list{display:none}
+.work.list-off.rail-off{grid-template-columns:0 minmax(0,1fr) 0}
+.lresize{position:absolute;top:0;bottom:0;right:-3px;width:6px;cursor:col-resize;z-index:3}
+.lresize:hover,.lresize.drag{background:var(--accent);opacity:.45}
+body.resizing{cursor:col-resize;user-select:none}
+.msel{position:relative}
+.msel > button{background:var(--bg);border:1px solid var(--line2);border-radius:6px;padding:6px 10px;color:var(--text);cursor:pointer;font:inherit}
+.pop{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:20;background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:4px 0;min-width:280px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.pop.on{display:block}
+.pop label{display:flex;gap:8px;align-items:center;padding:5px 10px;cursor:pointer;font-size:12px}
+.pop label:hover{background:var(--line)}
+.pop label.off{opacity:.45}
 .col{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
 .col:last-child{border-right:0}
-.work.rail-off{grid-template-columns:320px minmax(0,1fr)}
+.work.rail-off{grid-template-columns:var(--lw) minmax(0,1fr) 0}
 .work.rail-off > .col.rail{display:none}
 .railbtn{background:none;border:1px solid var(--line2);border-radius:5px;color:var(--muted);cursor:pointer;padding:2px 8px;font-size:12px}
 .railbtn:hover{color:var(--text);border-color:var(--accent)}
@@ -204,6 +220,7 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
     <span id="h-today">API 今日 <b>–</b> 次</span>
     <span id="h-alerts"></span>
     <span id="h-ws"><span class="dot"></span>连接中</span>
+    <button class="railbtn" id="list-toggle" title="显示 / 隐藏任务栏（快捷键 [）">任务栏</button>
     <button class="railbtn" id="rail-toggle" title="显示 / 隐藏右栏（快捷键 \）">侧栏</button>
   </div>
 </header>
@@ -224,7 +241,10 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
         <option value="research">联网检索</option>
         <option value="writing">写作</option>
         <option value="analysis">分析</option>
+        <option value="pick" hidden>自选</option>
+        <option value="committee" hidden>委员会</option>
       </select>
+      <span id="picker" style="display:contents"></span>
       <select id="goal" title="路由目标">
         <option value="balanced">均衡</option>
         <option value="fastest">最快</option>
@@ -235,18 +255,20 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
     </div>
   </div>
   <div class="work" id="work">
-    <div class="col">
+    <div class="col list">
       <div class="colhead">任务
         <div class="r filters" id="filters">
           <button data-f="all" class="on">全部</button>
           <button data-f="running">进行中</button>
           <button data-f="failed">失败</button>
+          <button class="railbtn" id="list-hide" title="收起任务栏（[）" style="margin-left:6px">‹</button>
         </div>
       </div>
+      <div class="lresize" id="lresize" title="拖动调整宽度，双击恢复默认"></div>
       <div class="scroll" id="tasks"><div class="empty">还没有任务</div></div>
     </div>
     <div class="col" id="detail">
-      <div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>\</kbd> 侧栏</span></div>
+      <div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>[</kbd> 任务栏 · <kbd>\</kbd> 侧栏</span></div>
     </div>
     <div class="col rail">
       <div class="colhead">需要你处理 <span class="r" id="alerts-count"></span><button class="railbtn" id="rail-hide" title="隐藏右栏（\）" style="margin-left:8px">收起 ›</button></div>
@@ -338,7 +360,45 @@ let mode = '';
 document.querySelectorAll('#mode button').forEach(b => b.onclick = () => {
   mode = b.dataset.v;
   document.querySelectorAll('#mode button').forEach(x => x.classList.toggle('on', x === b));
+  syncCategory();
 });
+let committee = JSON.parse(localStorage.getItem('oasis_committee') || '[]');
+function syncCategory() {
+  const sel = $('category');
+  [...sel.options].forEach(o => {
+    if (o.value === 'pick') o.hidden = mode !== 'agent';
+    if (o.value === 'committee') o.hidden = mode !== 'chat';
+  });
+  if (sel.selectedOptions[0] && sel.selectedOptions[0].hidden) sel.value = '';
+  renderPicker();
+}
+function renderPicker() {
+  const v = $('category').value, box = $('picker');
+  if (v === 'pick') {
+    const ags = agtCache.filter(a => a.enabled);
+    const cur = localStorage.getItem('oasis_pick') || '';
+    box.innerHTML = ags.length
+      ? '<select id="agent-pick" title="指定由哪个 agent 执行">' + ags.map(a => '<option value="' + esc(a.name) + '"' + (a.name === cur ? ' selected' : '') + '>' + esc(a.name) + (agtHealth(a) === 'ok' ? '' : '（异常）') + '</option>').join('') + '</select>'
+      : '<span class="dim">加载 agent…</span>';
+    if ($('agent-pick')) $('agent-pick').onchange = e => localStorage.setItem('oasis_pick', e.target.value);
+  } else if (v === 'committee') {
+    const accs = accCache.filter(a => a.enabled);
+    if (accs.length) committee = committee.filter(n => accs.some(a => a.name === n));
+    box.innerHTML = '<div class="msel"><button id="cm-btn" type="button" title="选 2–3 个账户，汇总模型由路由器自动挑">成员 ' + committee.length + '/3 ▾</button><div class="pop" id="cm-pop">' +
+      (accs.length ? accs.map(a => '<label class="' + (accHealth(a) === 'ok' ? '' : 'off') + '"><input type="checkbox" value="' + esc(a.name) + '"' + (committee.includes(a.name) ? ' checked' : '') + '><span class="mono">' + esc(a.name) + '</span><span class="dim">' + esc((a.models || [])[0] || '') + '</span></label>').join('') : '<div class="dim" style="padding:6px 10px">加载账户…</div>') +
+      '<div class="dim" style="padding:6px 10px;border-top:1px solid var(--line);margin-top:4px">选 2–3 个；各家并行作答，再由路由器选一个模型汇总</div></div></div>';
+    $('cm-btn').onclick = e => { e.stopPropagation(); $('cm-pop').classList.toggle('on'); };
+    $('cm-pop').onclick = e => e.stopPropagation();
+    $('cm-pop').querySelectorAll('input').forEach(cb => cb.onchange = () => {
+      if (cb.checked && committee.length >= 3) { cb.checked = false; toast('最多选 3 个'); return; }
+      committee = cb.checked ? committee.concat(cb.value) : committee.filter(n => n !== cb.value);
+      localStorage.setItem('oasis_committee', JSON.stringify(committee));
+      $('cm-btn').textContent = '成员 ' + committee.length + '/3 ▾';
+    });
+  } else box.innerHTML = '';
+}
+$('category').onchange = renderPicker;
+document.addEventListener('click', () => { const p = $('cm-pop'); if (p) p.classList.remove('on'); });
 const promptEl = $('prompt');
 promptEl.addEventListener('input', () => { promptEl.style.height = 'auto'; promptEl.style.height = Math.min(180, promptEl.scrollHeight + 2) + 'px'; });
 promptEl.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run(); } });
@@ -347,6 +407,11 @@ $('run').onclick = run;
 async function run() {
   const text = promptEl.value.trim();
   if (!text) { promptEl.focus(); return; }
+  const cat = $('category').value;
+  const pick = cat === 'pick' ? ($('agent-pick') && $('agent-pick').value) : '';
+  if (cat === 'pick' && !pick) { toast('没有可选的 agent'); return; }
+  if (cat === 'committee' && committee.length < 2) { toast('委员会至少选 2 个账户'); $('cm-pop') && $('cm-pop').classList.add('on'); return; }
+  const stream = cat !== 'committee';
   const ref = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   S.pendingRef = ref;
   S.localAnswers[ref] = '';
@@ -357,12 +422,14 @@ async function run() {
     'X-Oasis-Client-Ref': ref
   };
   if (mode) headers['X-Oasis-Mode'] = mode;
-  if ($('category').value) headers['X-Oasis-Category'] = $('category').value;
+  if (cat === 'pick') { headers['X-Oasis-Mode'] = 'agent'; headers['X-Oasis-Agent'] = pick; }
+  else if (cat === 'committee') headers['X-Oasis-Committee'] = committee.join(',');
+  else if (cat) headers['X-Oasis-Category'] = cat;
   $('run').disabled = true;
   setTimeout(() => { $('run').disabled = false; }, 600);
   promptEl.value = ''; promptEl.style.height = 'auto';
   try {
-    const res = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: null, messages: [{ role: 'user', content: text }], stream: true }) });
+    const res = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: null, messages: [{ role: 'user', content: text }], stream }) });
     if (!res.ok || !res.body) {
       let msg = 'HTTP ' + res.status;
       try { const j = await res.json(); msg += ' ' + (j.error || JSON.stringify(j)); } catch (e) {}
@@ -370,6 +437,7 @@ async function run() {
       toast('请求失败：' + msg);
       return;
     }
+    if (!stream) { await res.text(); S.dirtyList = true; if (S.sel && S.refs[S.sel] === ref) S.dirtyDetail = true; return; }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -488,7 +556,7 @@ function renderDetail(scrollEnd) {
       '<div class="dtitle">' + (esc(d.title) || '<span class="dim">（无标题）</span>') + '</div>' +
       '<div class="chips"><span class="pill ' + d.status + '">' + stTxt + '</span>' +
         '<span>执行 <b class="mono">' + esc(d.executor || '–') + '</b></span>' +
-        '<span>' + (d.mode === 'agent' ? 'Agent' : '问答') + ' · ' + esc(CAT[d.category] || d.category || '通用') + '</span>' +
+        '<span>' + (d.mode === 'agent' ? 'Agent' : d.mode === 'committee' ? '委员会' : '问答') + ' · ' + esc(CAT[d.category] || d.category || '通用') + '</span>' +
         '<span>耗时 <b>' + fmtDur(d.duration_ms) + '</b></span>' +
         (nSteps ? '<span>工具 <b>' + nSteps + '</b> 次</span>' : '') +
         '<span>来源 ' + esc(SRC[d.source] || d.source) + '</span>' +
@@ -553,6 +621,10 @@ function renderTimeline(d) {
           (e.error && e.error !== e.hint ? '<div class="err-raw">' + esc(e.error) + '</div>' : '') + ' <span class="muted">· ' + fmtDur(e.latency_ms) + '</span>');
         break;
       case 'handoff': row('ho', e, '⇄', '<span class="lbl" style="color:var(--warn)">切换 ' + esc(e.level) + '</span>' + esc(e.text)); break;
+      case 'member':
+        row(e.ok ? 'ok' : 'bad', e, '◆', '<span class="lbl">成员</span><span class="mono">' + esc(e.account) + '</span>' +
+          (e.ok ? ' 作答 · ' + fmtDur(e.latency_ms) + clampText(e.text || '', d.id + ':m:' + e.account) : ' <span class="hl">未能作答：' + esc(e.hint || e.error || '') + '</span>'));
+        break;
       case 'rating': row('ok', e, '★', '<span class="lbl">评价</span>' + esc(e.text)); break;
       case 'done': row(e.ok ? 'ok' : 'bad', e, '■', e.ok ? '任务完成' : '<span class="hl">任务失败' + (e.error ? '：' + esc(e.error) : '') + '</span>'); break;
       case 'step': {
@@ -615,6 +687,7 @@ async function loadResources() {
   try {
     const [acc, agt] = await Promise.all([fetch('/api/accounts').then(r => r.json()), fetch('/api/agents').then(r => r.json())]);
     accCache = acc.accounts || []; agtCache = agt.configured || [];
+    if (['pick', 'committee'].includes($('category').value) && /加载/.test($('picker').textContent)) renderPicker();
     const ea = accCache.filter(a => a.enabled), eg = agtCache.filter(a => a.enabled);
     const okA = ea.filter(a => accHealth(a) === 'ok').length, okG = eg.filter(a => agtHealth(a) === 'ok').length;
     $('h-acc').innerHTML = '<span class="dot ' + (okA === ea.length ? 'ok' : 'warn') + '"></span>账户 <b>' + okA + '/' + ea.length + '</b>';
@@ -673,6 +746,32 @@ $('rail-hide').onclick = () => setRail(false);
 $('h-alerts').onclick = () => setRail(true);
 setRail(localStorage.getItem('oasis_rail') !== '0');
 
+/* ---------- left list: collapse + resize ---------- */
+function setList(on) {
+  $('work').classList.toggle('list-off', !on);
+  $('list-toggle').classList.toggle('on', on);
+  localStorage.setItem('oasis_list', on ? '1' : '0');
+}
+$('list-toggle').onclick = () => setList($('work').classList.contains('list-off'));
+$('list-hide').onclick = () => setList(false);
+setList(localStorage.getItem('oasis_list') !== '0');
+const savedLw = parseInt(localStorage.getItem('oasis_lw') || '0', 10);
+if (savedLw) $('work').style.setProperty('--lw', savedLw + 'px');
+$('lresize').onmousedown = e => {
+  e.preventDefault();
+  const r = $('lresize'), x0 = e.clientX, w0 = r.parentElement.getBoundingClientRect().width;
+  let w = w0;
+  r.classList.add('drag'); document.body.classList.add('resizing');
+  const move = ev => { w = Math.max(220, Math.min(720, w0 + ev.clientX - x0)); $('work').style.setProperty('--lw', w + 'px'); };
+  const up = () => {
+    r.classList.remove('drag'); document.body.classList.remove('resizing');
+    document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+    localStorage.setItem('oasis_lw', String(Math.round(w)));
+  };
+  document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+};
+$('lresize').ondblclick = () => { $('work').style.removeProperty('--lw'); localStorage.removeItem('oasis_lw'); };
+
 /* ---------- keyboard ---------- */
 document.addEventListener('keydown', e => {
   const typing = ['TEXTAREA', 'INPUT', 'SELECT'].includes(document.activeElement.tagName);
@@ -680,6 +779,7 @@ document.addEventListener('keydown', e => {
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === '/') { e.preventDefault(); promptEl.focus(); }
   else if (e.key === '\\') { setRail($('work').classList.contains('rail-off')); }
+  else if (e.key === '[') { setList($('work').classList.contains('list-off')); }
   else if (e.key === 'j' || e.key === 'k') {
     const list = visibleTasks(); if (!list.length) return;
     const i = list.findIndex(t => t.id === S.sel);

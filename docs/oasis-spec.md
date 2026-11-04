@@ -202,6 +202,12 @@ EMA 与样本数持久化到 `.oasis-data/latency.json`（每个 `task_done` 写
   任务永远"进行中"。调用方中途断开时任务以失败结束（`task_done.error` 说明结果未送达）
 - **异步任务**（MCP agent 任务默认）：秒回 task_id → `oasis_task_status` 轮询
   running/done/failed——解决"MCP 客户端超时 < agent 执行时长"的矛盾
+- **指定 agent**（`X-Oasis-Agent: <name>`）：强制 agent 模式，只用这一个 agent——不探索、不替换，
+  它不可用就直接失败（控制台：Agent 模式下类别选「自选」）
+- **委员会**（`X-Oasis-Committee: a,b[,c]`，2–3 个 API 账户，去重）：各成员并行做一次非流式调用（单个 240s 超时），
+  每家答完即推 `committee_member` 事件；≥2 家成功后按 `analysis` 类别 + 请求的 goal 由路由器挑汇总模型
+  （可以是成员之一，失败按回退链换下一个），回答 = `## 汇总（X）` + 汇总 + 各家原文；只有 1 家成功则直接返回原文，
+  全失败 502。始终非流式返回，`oasis` 字段列出成员成败与汇总者（控制台：问答模式下类别选「委员会」，多选成员）
 
 #### 2.4.1 失败分类与熔断 **[0.3 新增]**
 
@@ -221,7 +227,7 @@ daily 语义）是**每 30s 烧一次请求并污染时延 EMA**。0.3 区分三
 
 | 接口 | 说明 |
 |---|---|
-| `POST /v1/chat/completions` | OpenAI 兼容（流式 SSE / 非流式）；头 `X-Oasis-Category` `X-Oasis-Goal` `X-Oasis-Mode` `X-Oasis-Session`；可选 `X-Oasis-Source`（来源标签，默认 `api`）、`X-Oasis-Client-Ref`（原样回显在 `task_started`，供控制台关联自己发起的请求） |
+| `POST /v1/chat/completions` | OpenAI 兼容（流式 SSE / 非流式）；头 `X-Oasis-Category` `X-Oasis-Goal` `X-Oasis-Mode` `X-Oasis-Session`；可选 `X-Oasis-Source`（来源标签，默认 `api`）、`X-Oasis-Client-Ref`（原样回显在 `task_started`，供控制台关联自己发起的请求）、`X-Oasis-Agent`（指定 agent）、`X-Oasis-Committee`（委员会成员，§2.4） |
 | `GET /v1/models` | KB 模型列表 |
 | `POST /mcp` | MCP（JSON-RPC 2.0 / Streamable HTTP 简化）11 工具：oasis_ask、oasis_agent_task、oasis_task_status、oasis_status、oasis_decisions、oasis_send_message、oasis_check_inbox、oasis_ask_user、oasis_activity、oasis_agents、oasis_models |
 | `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点 + 已配置 agent 的信号）、activity（时间线）、requests（审计）、**feed**（最近任务摘要）、**feed/task?id=**（单任务：路由说明 + 时间线 + 回答）、**alerts**（需要处理的问题 + 可复制的修复命令） |

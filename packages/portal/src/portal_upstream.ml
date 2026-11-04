@@ -101,7 +101,7 @@ let upstream_call = fun ?connect_ip ~scheme ~host ~port ~path ~headers ~body () 
       )
 
 (** Run an outbound request on a dedicated blocking lane; wait up to 60s. *)
-let blocking_call = fun ?connect_ip ~scheme ~host ~port ~path ~headers ~body () ->
+let blocking_call = fun ?connect_ip ?(timeout_s = 60) ~scheme ~host ~port ~path ~headers ~body () ->
   let reply_to = self () in
   let _ =
     Runtime.spawn_blocked (fun () ->
@@ -114,8 +114,8 @@ let blocking_call = fun ?connect_ip ~scheme ~host ~port ~path ~headers ~body () 
     | Upstream_result r -> Select r
     | _ -> Skip
   in
-  try receive ~selector ~timeout:(Time.Duration.from_secs 60) ()
-  with Receive_timeout -> Error "upstream timeout (60s)"
+  try receive ~selector ~timeout:(Time.Duration.from_secs timeout_s) ()
+  with Receive_timeout -> Error ("upstream timeout (" ^ Int.to_string timeout_s ^ "s)")
 
 (** Outbound streaming request on a blocking lane: body chunks and failures
     are reported to [to_pid] as messages. *)

@@ -47,10 +47,14 @@ let agent_prompt_of_body = fun (body : Json.t) ->
   in
   system_prefix ^ String.concat "\n" rest
 
-let route_agents = fun (state : state) (config : Portal_config.t) (category : string) (model : string option) ->
+(** [?only] pins the pool to one agent the user picked: no exploration, no
+    substitutes. *)
+let route_agents = fun ?only (state : state) (config : Portal_config.t) (category : string) (model : string option) ->
   let now = Portal_signals.now_ms () in
   let candidates =
-    List.filter config.Portal_config.agents ~fn:(fun a -> a.Portal_agent.enabled)
+    List.filter config.Portal_config.agents ~fn:(fun a ->
+      a.Portal_agent.enabled
+      && match only with Some n -> String.equal a.Portal_agent.name n | None -> true)
   in
   let rejects = ref [] in
   let passing =
@@ -113,7 +117,7 @@ let route_agents = fun (state : state) (config : Portal_config.t) (category : st
     unpriced = [];
     handoffs = [];
   }
-  |> maybe_explore state
+  |> fun d -> if Option.is_some only then d else maybe_explore state d
 
 let find_agent = fun (config : Portal_config.t) name ->
   List.find config.Portal_config.agents ~fn:(fun a -> String.equal a.Portal_agent.name name)
@@ -167,35 +171,14 @@ let agent_result_json = fun ~agent ~text ->
       );
     ]
 
-let handle_chat_agent = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(category : string) ~(stream_requested : bool) ~(request_id : string) ->
+let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Json.t) ~(category : string) ~(stream_requested : bool) ~(request_id : string) ->
   audit_log state ~path:"/agent-path-enter" ~category ~goal:"-" ~stream_:stream_requested ~request_id ();
   let config = Sync.Atomic.get state.config in
   let model =
     Json.get_field "model" body |> Option.and_then ~fn:Json.get_string
   in
-  let decision = route_agents state config category model in
-  broadcast_event
-    state
-    ~type_:"routed"
-    ~request_id
-    ~data:
-      (Json.obj
-        [
-          ("mode", Json.string "agent");
-          ("chosen", decision.Portal_router.chosen |> Option.map ~fn:Json.string |> Option.unwrap_or ~default:Json.null);
-          (
-            "candidates",
-            Json.array
-              (List.map decision.Portal_router.scores ~fn:(fun (nm, sc) ->
-                Json.obj [ ("name", Json.string nm); ("score", Json.int sc) ]))
-          );
-          (
-            "rejected",
-            Json.array
-              (List.map decision.Portal_router.rejected ~fn:(fun r ->
-                Json.obj [ ("name", Json.string r.Portal_router.account); ("reason", Json.string r.Portal_router.reason) ]))
-          );
-        ]);
+  let decision = route_agents ?only:pinned state config category model in
+  emit_routed ~pinned:(Option.is_some pinned) state ~request_id ~mode:"agent" decision;
   audit_log
     state
     ~path:"/agent-path-routed"
