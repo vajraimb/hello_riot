@@ -2190,6 +2190,73 @@ let handoff_case = fun ?prefill ?max_handoffs ?(extra = []) ?(headers = []) ~n ~
 
 let nth_mock = fun mocks i -> List.get_unchecked mocks ~at:i
 
+(** Minimal dashboard WebSocket client: handshake, then server frames
+    (unmasked) are decoded into text payloads. *)
+let ws_connect = fun ~port ->
+  match Net.TcpStream.connect (Net.Addr.tcp Net.Addr.loopback port) with
+  | Error _ -> Error "ws connect failed"
+  | Ok s ->
+      let req =
+        IO.Bytes.from_string
+          "GET /ws HTTP/1.1\r\nHost: gw\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+      in
+      let _ = Net.TcpStream.write s req ~pos:0 ~len:(IO.Bytes.length req) () in
+      let buf = IO.Bytes.create ~size:65536 in
+      let rec head acc =
+        match String.split ~by:"\r\n\r\n" acc with
+        | h :: (_ :: _ as rest) ->
+            if String.contains h " 101 " then Ok (s, String.concat "\r\n\r\n" rest)
+            else Error ("ws handshake: " ^ h)
+        | _ -> (
+            match Net.TcpStream.read s buf ~timeout:(Time.Duration.from_secs 5) () with
+            | Ok n when n > 0 -> head (acc ^ IO.Bytes.sub_string buf ~offset:0 ~len:n)
+            | _ -> Error "ws handshake: no response"
+          )
+      in
+      head ""
+
+let ws_frames = fun data ->
+  let byte i = Char.to_int (String.get_unchecked data ~at:i) in
+  let total = String.length data in
+  let rec go pos acc =
+    if pos + 2 > total then (List.rev acc, String.sub data ~offset:pos ~len:(total - pos))
+    else
+      let l7 = byte (pos + 1) land 0x7f in
+      let (len, hdr) =
+        if l7 = 126 then
+          if pos + 4 > total then (-1, 0) else ((byte (pos + 2) lsl 8) lor byte (pos + 3), 4)
+        else if l7 = 127 then
+          if pos + 10 > total then (-1, 0)
+          else (List.fold_left [ 2; 3; 4; 5; 6; 7; 8; 9 ] ~init:0 ~fn:(fun a k -> (a lsl 8) lor byte (pos + k)), 10)
+        else (l7, 2)
+      in
+      if len < 0 || pos + hdr + len > total then (List.rev acc, String.sub data ~offset:pos ~len:(total - pos))
+      else go (pos + hdr + len) (String.sub data ~offset:(pos + hdr) ~len :: acc)
+  in
+  go 0 []
+
+(** Reads dashboard events until one satisfies [stop] (or reads time out). *)
+let ws_collect_events = fun (s, leftover) ~stop ->
+  let buf = IO.Bytes.create ~size:65536 in
+  let rec loop pending acc =
+    let (frames, rest) = ws_frames pending in
+    let events =
+      List.filter_map frames ~fn:(fun f ->
+        match Json.from_string f with
+        | Ok j when String.equal (h_field_str j "type") "event" -> Some j
+        | _ -> None)
+    in
+    let acc = acc @ events in
+    if List.any events ~fn:stop then acc
+    else
+      match Net.TcpStream.read s buf ~timeout:(Time.Duration.from_secs 3) () with
+      | Ok n when n > 0 -> loop (rest ^ IO.Bytes.sub_string buf ~offset:0 ~len:n) acc
+      | _ -> acc
+  in
+  let evs = loop leftover [] in
+  Net.TcpStream.close s;
+  evs
+
 let expect_level = fun handoffs lvl ->
   match handoffs with
   | [ h ] ->
@@ -2214,6 +2281,63 @@ let test_h1_exact_replay = fun _ctx ->
           Test.assert_equal ~expected:"acc_1" ~actual:(h_field_str h "to");
           Ok ())
     ()
+
+let test_ws_events_trace_streaming_handoff = fun _ctx ->
+  match start_mocks 2 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      Mock.set_scenario (nth_mock mocks 0) (dying_after "ev1" [ "ev2" ]);
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ " ev2 ev3" ]; echo_prefix = Mock.Echo_exact };
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          match ws_connect ~port:gw.port with
+          | Error e -> Error e
+          | Ok ws -> (
+              (* the server registers the socket right after writing the 101 *)
+              sleep (Time.Duration.from_millis 100);
+              match h_stream ~port:gw.port () with
+              | Error e -> Error e
+              | Ok (_, _, deltas) ->
+                  Test.assert_equal ~expected:"ev1 ev2 ev3" ~actual:(String.concat "" deltas);
+                  let evs =
+                    ws_collect_events ws ~stop:(fun j -> String.equal (h_field_str j "event") "task_done")
+                  in
+                  let data j = Json.get_field "data" j |> Option.unwrap_or ~default:(Json.obj []) in
+                  let tag j =
+                    let d = data j in
+                    let acct = h_field_str d "account" in
+                    h_field_str j "event" ^ (if String.is_empty acct then "" else ":" ^ acct)
+                  in
+                  let tags = List.map evs ~fn:tag in
+                  let expected =
+                    [
+                      "task_started";
+                      "routed";
+                      "attempt_started:acc_0";
+                      "attempt_finished:acc_0";
+                      "attempt_started:acc_1";
+                      "handoff";
+                      "attempt_finished:acc_1";
+                      "task_done";
+                    ]
+                  in
+                  Test.assert_equal ~expected:(String.concat " " expected) ~actual:(String.concat " " tags);
+                  match List.find evs ~fn:(fun j -> String.equal (h_field_str j "event") "handoff") with
+                  | None -> Error "no handoff event"
+                  | Some j ->
+                      let h = data j in
+                      Test.assert_equal ~expected:"G1" ~actual:(h_field_str h "level");
+                      Test.assert_equal ~expected:3 ~actual:(h_field_int h "matched_bytes");
+                      Test.assert_equal ~expected:3 ~actual:(h_field_int h "sent_bytes");
+                      Test.assert_equal ~expected:(Some false) ~actual:(Json.get_field "diverged" h |> Option.and_then ~fn:Json.get_bool);
+                      let done_ = List.rev evs |> List.head |> Option.map ~fn:data |> Option.unwrap_or ~default:(Json.obj []) in
+                      Test.assert_equal ~expected:"acc_1" ~actual:(h_field_str done_ "chosen");
+                      Test.assert_equal ~expected:(Some true) ~actual:(Json.get_field "ok" done_ |> Option.and_then ~fn:Json.get_bool);
+                      Ok ()
+            )
+        )
+    )
 
 let test_h2_direct_continuation = fun _ctx ->
   handoff_case ~n:2
@@ -3018,6 +3142,7 @@ let tests =
     case "router v2: cheapest vs fastest goal" test_router_v2_cheapest_goal;
     case "router v2: breaker open rejects account" test_router_v2_breaker_blocks;
     case ~size:Test.Large "H1: exact replay is deduplicated (G1)" test_h1_exact_replay;
+    case ~size:Test.Large "ws: streaming handoff emits the full event trace" test_ws_events_trace_streaming_handoff;
     case ~size:Test.Large "H2: direct continuation (G1)" test_h2_direct_continuation;
     case ~size:Test.Large "H3: divergence inside a multi-byte char stays valid UTF-8 (G2)" test_h3_multibyte_divergence;
     case ~size:Test.Large "H4: drifting replay forwarded from divergence (G2)" test_h4_mutated_replay;

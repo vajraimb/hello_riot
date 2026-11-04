@@ -32,6 +32,62 @@ let broadcast_event = fun (state : state) ~(type_ : string) ~(request_id : strin
         ("data", data);
       ])
 
+let emit_routed = fun (state : state) ~(request_id : string) ~(mode : string) (d : Portal_router.decision) ->
+  broadcast_event
+    state
+    ~type_:"routed"
+    ~request_id
+    ~data:
+      (Json.obj
+        [
+          ("mode", Json.string mode);
+          ("chosen", d.Portal_router.chosen |> Option.map ~fn:Json.string |> Option.unwrap_or ~default:Json.null);
+          (
+            "candidates",
+            Json.array
+              (List.map d.Portal_router.scores ~fn:(fun (nm, sc) ->
+                Json.obj [ ("name", Json.string nm); ("score", Json.int sc) ]))
+          );
+          (
+            "rejected",
+            Json.array
+              (List.map d.Portal_router.rejected ~fn:(fun r ->
+                Json.obj [ ("name", Json.string r.Portal_router.account); ("reason", Json.string r.Portal_router.reason) ]))
+          );
+        ])
+
+let emit_attempt_started = fun (state : state) ~(request_id : string) ~(account : string) ->
+  broadcast_event state ~type_:"attempt_started" ~request_id ~data:(Json.obj [ ("account", Json.string account) ])
+
+let emit_attempt_finished = fun (state : state) ~(request_id : string) ~(account : string) ~(status : int option) ~(latency_ms : int) ~(error : string option) ->
+  broadcast_event
+    state
+    ~type_:"attempt_finished"
+    ~request_id
+    ~data:
+      (Json.obj
+        ([
+           ("account", Json.string account);
+           ("status", status |> Option.map ~fn:Json.int |> Option.unwrap_or ~default:Json.null);
+           ("latency_ms", Json.int latency_ms);
+         ]
+        @ (match error with
+           | Some e -> [ ("error", Json.string e) ]
+           | None -> [])))
+
+let emit_task_done = fun (state : state) ~(request_id : string) ~(chosen : string option) ~(attempts : int) ~(ok : bool) ->
+  broadcast_event
+    state
+    ~type_:"task_done"
+    ~request_id
+    ~data:
+      (Json.obj
+        [
+          ("chosen", Json.string (chosen |> Option.unwrap_or ~default:"none"));
+          ("attempts", Json.int attempts);
+          ("ok", Json.bool ok);
+        ])
+
 let write_stream = fun stream payload ->
   let buf = IO.Bytes.from_string payload in
   let total = IO.Bytes.length buf in

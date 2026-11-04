@@ -29,17 +29,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
             { decision with Portal_router.attempts = List.rev acc }
           in
           record_decision state decision';
-          broadcast_event
-            state
-            ~type_:"task_done"
-            ~request_id
-            ~data:
-              (Json.obj
-                [
-                  ("chosen", Json.string "none");
-                  ("attempts", Json.int (List.length acc));
-                  ("ok", Json.bool false);
-                ]);
+          emit_task_done state ~request_id ~chosen:None ~attempts:(List.length acc) ~ok:false;
           {
             cst_status = 502;
             cst_body =
@@ -52,13 +42,10 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
             cst_decision = decision';
           }
       | name :: rest -> (
-          broadcast_event
-            state
-            ~type_:"attempt_started"
-            ~request_id
-            ~data:(Json.obj [ ("account", Json.string name) ]);
+          emit_attempt_started state ~request_id ~account:name;
           match Portal_config.find_account config name with
           | None ->
+              emit_attempt_finished state ~request_id ~account:name ~status:None ~latency_ms:0 ~error:(Some "unknown_account");
               try_attempts
                 ({
                    Portal_router.account = name;
@@ -132,6 +119,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
               (
                 match call_result with
                 | Error err ->
+                    emit_attempt_finished state ~request_id ~account:name ~status:None ~latency_ms:0 ~error:(Some err);
                     let _ = apply_failure state config ~account:name ~status:None ~body:"" ~err in
                     try_attempts
                       ({
@@ -145,17 +133,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                       :: acc)
                       rest
                 | Ok (status, resp_body, latency_ms) ->
-                    broadcast_event
-                      state
-                      ~type_:"attempt_finished"
-                      ~request_id
-                      ~data:
-                        (Json.obj
-                          [
-                            ("account", Json.string name);
-                            ("status", Json.int status);
-                            ("latency_ms", Json.int latency_ms);
-                          ]);
+                    emit_attempt_finished state ~request_id ~account:name ~status:(Some status) ~latency_ms ~error:None;
                     if status = 200 then (
                       let resp_body_conv =
                         if anthropic then
@@ -206,6 +184,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                         }
                       in
                       record_decision state decision';
+                      emit_task_done state ~request_id ~chosen:(Some name) ~attempts:(List.length acc + 1) ~ok:true;
                       (* re-pin the session to the account that actually
                          served the request (fallback may have switched) *)
                       (
@@ -400,6 +379,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
       candidates
   in
   let extra = passthrough_fields body in
+  emit_routed state ~request_id ~mode:"account" decision;
   (* pin at dispatch (updated again on successful handoff) *)
   (
     match (session, List.head candidates) with

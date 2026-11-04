@@ -50,6 +50,7 @@ pre{background:#070b16;padding:8px;border-radius:6px;font-size:12px;margin:6px 0
 .gedge.fallback { stroke-dasharray: 6 5; stroke: var(--amber); }
 .gedge.chosen { stroke: #38bdf8; stroke-width: 2.5; }
 .gedge.rejected { stroke: #7f1d1d; stroke-dasharray: 6 5; }
+.gedge.handoff { stroke-dasharray: none; stroke-width: 2.5; }
 #graph-box { background:#070b16; border:1px solid var(--border); border-radius:8px; overflow-x:auto; min-height:200px; }
 #graph-box svg { min-width: 760px; }
 </style>
@@ -218,14 +219,22 @@ async function refreshDecisions() {
     const attempts = (d.attempts || []).map(a =>
       a.account + '(' + (a.status != null ? a.status : (a.error || '?')) + ':' + a.latency_ms + 'ms)'
     ).join(' → ');
-    const handoff = (d.attempts || []).length > 1 ? ' <span class="handoff">[切换]</span>' : '';
+    const handoff = handoffSummary(d);
     const rejected = (d.rejected || []).map(r => r.account + '✗' + r.reason).join(' ');
     const scores = (d.scores || []).map(s => s.account + ':' + s.score).join(' ');
     addLine(d.task_category + ' → ' + (d.chosen || '无') + handoff +
       ' | attempts: ' + attempts +
       (rejected ? ' | 拒绝: ' + rejected : '') +
-      ' | scores: ' + scores);
+      ' | scores: ' + scores, handoff ? 'handoff' : null);
   }
+}
+function handoffLabel(h) {
+  return h.level + ' · ' + h.matched_bytes + '/' + h.sent_bytes + 'B' + (h.diverged ? ' · 分叉' : '');
+}
+function handoffSummary(d) {
+  const hs = d.handoffs || [];
+  if (hs.length) return ' [handoff ' + hs.map(h => h.from + '→' + h.to + ' ' + handoffLabel(h)).join(', ') + ']';
+  return (d.attempts || []).length > 1 ? ' [回退]' : '';
 }
 const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (oasisToken ? '?token=' + encodeURIComponent(oasisToken) : ''));
 ws.onopen = () => {
@@ -236,6 +245,7 @@ ws.onopen = () => {
 const NS = 'http://www.w3.org/2000/svg';
 const graphBox = document.getElementById('graph-box');
 const GW = 900, GH = 400;
+const HANDOFF_COLORS = { G1: '#22c55e', G2: '#f59e0b', G3: '#a78bfa', G0: '#ef4444' };
 let graph = { req: null, candidates: [], attempts: [], svg: null };
 
 function svgEl(tag, attrs, parent) {
@@ -266,6 +276,10 @@ function gReset(req) {
   mk('soma-ok', '#86efac', '#15803d');
   mk('soma-fail', '#fca5a5', '#b91c1c');
   mk('soma-cand', '#cbd5e1', '#475569');
+  for (const lv in HANDOFF_COLORS) {
+    const m = svgEl('marker', { id: 'ho-' + lv, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs);
+    svgEl('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: HANDOFF_COLORS[lv] }, m);
+  }
   // task node
   const g = svgEl('g', { class: 'gnode soma glow' }, svg);
   svgEl('circle', { cx: GW / 2, cy: 44, r: 16 }, g);
@@ -308,12 +322,36 @@ function gNode(x, y, label, opts) {
   return g;
 }
 function gEdgeTo(e1, e2, kind) { gEdge(e1.x, e1.y, e2.x, e2.y, kind); }
+function gHandoff(h) {
+  const from = graph.attempts.filter(t => t.name === h.from && t.finished).pop();
+  const to = graph.attempts.filter(t => t.name === h.to && t !== from).pop();
+  if (!from || !to) return;
+  const color = HANDOFF_COLORS[h.level] || HANDOFF_COLORS.G0;
+  const lift = 70 + 12 * Math.abs(graph.attempts.indexOf(to) - graph.attempts.indexOf(from));
+  const y1 = from.y - 16, y2 = to.y - 16;
+  svgEl('path', {
+    d: 'M ' + from.x + ' ' + y1 + ' C ' + from.x + ' ' + (y1 - lift) + ', ' + to.x + ' ' + (y2 - lift) + ', ' + to.x + ' ' + y2,
+    fill: 'none', stroke: color, class: 'gedge handoff', 'marker-end': 'url(#ho-' + (HANDOFF_COLORS[h.level] ? h.level : 'G0') + ')'
+  }, graph.svg);
+  const mid = svgEl('text', { x: (from.x + to.x) / 2, y: Math.min(y1, y2) - lift * 0.75 - 4, 'text-anchor': 'middle', fill: color, 'font-size': 11, 'font-weight': 600 }, graph.svg);
+  mid.textContent = 'handoff ' + h.level + (h.model_changed ? ' · 换模型' : '');
+  const ann = svgEl('g', {}, graph.svg);
+  svgEl('text', { x: to.x, y: to.y + 62, 'text-anchor': 'middle', fill: color, 'font-size': 10 }, ann)
+    .textContent = '前缀 ' + h.matched_bytes + '/' + h.sent_bytes + 'B';
+  svgEl('text', { x: to.x, y: to.y + 75, 'text-anchor': 'middle', fill: h.diverged ? '#f97316' : '#22c55e', 'font-size': 10 }, ann)
+    .textContent = h.diverged ? '分叉（去重止于分叉点）' : '前缀一致';
+}
 function onEvent(ev) {
-  if (!ev || !ev.data || !graph.svg) return;
+  if (!ev || !ev.data) return;
   if (ev.event === 'task_started') {
     gReset({ category: ev.data.category, goal: ev.data.goal });
+    graph.requestId = ev.request_id;
     document.getElementById('graph-summary').textContent = '路由中…';
-  } else if (ev.event === 'routed') {
+    return;
+  }
+  // concurrent requests interleave on the socket: the graph follows the latest task only
+  if (!graph.svg || ev.request_id !== graph.requestId) return;
+  if (ev.event === 'routed') {
     const cands = (ev.data.candidates || []).slice(0, 6);
     const rejs = (ev.data.rejected || []).slice(0, 3);
     const total = cands.length + rejs.length;
@@ -360,6 +398,9 @@ function onEvent(ev) {
         gNode(t.x, t.y, t.name, { cls: 'fail', sub: ev.data.error || ('HTTP ' + ev.data.status), subColor: '#ef4444', mark: '✗', markColor: '#ef4444' });
       }
     }
+  } else if (ev.event === 'handoff') {
+    gHandoff(ev.data);
+    document.getElementById('graph-summary').textContent = 'handoff ' + ev.data.from + ' → ' + ev.data.to + '（' + handoffLabel(ev.data) + '）';
   } else if (ev.event === 'task_done') {
     const ok = ev.data.ok;
     document.getElementById('graph-summary').textContent = ok
@@ -379,7 +420,7 @@ ws.onmessage = (ev) => {
       const attempts = (d.attempts || []).map(a =>
         a.account + '(' + (a.status != null ? a.status : (a.error || '?')) + ')'
       ).join(' → ');
-      const handoff = (d.attempts || []).length > 1 ? ' [无缝切换]' : '';
+      const handoff = handoffSummary(d);
       addLine(d.task_category + ' → ' + (d.chosen || '无') + handoff + ' | attempts: ' + attempts, handoff ? 'handoff' : null);
       refreshAccounts();
     }

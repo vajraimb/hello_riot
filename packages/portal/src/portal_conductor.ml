@@ -209,6 +209,13 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
         }
       in
       record_decision cc.c_state decision;
+      emit_attempt_finished cc.c_state ~request_id:cc.request_id ~account:cs.current_account ~status:(Some 200) ~latency_ms ~error:None;
+      emit_task_done
+        cc.c_state
+        ~request_id:cc.request_id
+        ~chosen:(Some cs.current_account)
+        ~attempts:(List.length decision.Portal_router.attempts)
+        ~ok:true;
       (
         match cc.session with
         | Some sid ->
@@ -228,6 +235,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       cs.finished <- true;
       close_open_handoff ~unresolved:"G0";
       record_decision cc.c_state (decision_now ());
+      emit_task_done cc.c_state ~request_id:cc.request_id ~chosen:None ~attempts:(List.length cs.attempts) ~ok:false;
       let err =
         Json.obj
           [
@@ -251,6 +259,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       cs.finished <- true;
       close_open_handoff ~unresolved:"G0";
       record_decision cc.c_state (decision_now ());
+      emit_task_done cc.c_state ~request_id:cc.request_id ~chosen:None ~attempts:(List.length cs.attempts) ~ok:false;
       send parent (Conductor_done (Error e))
     )
   in
@@ -263,8 +272,10 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
           finish_failed ~reason:"all upstream accounts failed"
       | name :: rest -> (
           cs.candidates <- rest;
+          emit_attempt_started cc.c_state ~request_id:cc.request_id ~account:name;
           match Portal_config.find_account cc.config name with
           | None ->
+              emit_attempt_finished cc.c_state ~request_id:cc.request_id ~account:name ~status:None ~latency_ms:0 ~error:(Some "unknown_account");
               cs.attempts <-
                 {
                   Portal_router.account = name;
@@ -507,6 +518,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
         }
       in
       cs.attempts <- attempt :: cs.attempts;
+      emit_attempt_finished cc.c_state ~request_id:cc.request_id ~account:cs.current_account ~status ~latency_ms ~error:(Some err);
       (* text held back for head classification was really generated:
          deliver it before failing over *)
       flush_handoff ();
