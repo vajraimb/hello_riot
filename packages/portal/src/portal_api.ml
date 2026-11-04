@@ -229,6 +229,18 @@ let handle_feed_task = fun (state : state) (ctx : Trail.ctx) ->
 
 (** POST {"id", "rating": 1 | -1 | 0}: the user's verdict on a finished task
     feeds the executor's learned quality for that category (0 withdraws). *)
+(** POST /api/feed/cancel {"id"}: stops a running task (kills the agent
+    process / drops the upstream wait); no failover, no health penalty. *)
+let handle_cancel_task = fun (state : state) (ctx : Trail.ctx) ->
+  let body = parse_json_body ctx in
+  match Json.get_field "id" body |> Option.and_then ~fn:Json.get_string with
+  | None -> Trail.json ~status:Net.Http.Status.BadRequest ctx (Json.obj [ ("error", Json.string "缺少 id") ])
+  | Some id ->
+      if cancel_task state ~request_id:id ~reason:"user" then Trail.json ctx (Json.obj [ ("ok", Json.bool true) ])
+      else
+        Trail.json ~status:Net.Http.Status.NotFound ctx
+          (Json.obj [ ("error", Json.string "这个任务已经结束，或不是由本网关执行的") ])
+
 let handle_rate_task = fun (state : state) (ctx : Trail.ctx) ->
   let body = parse_json_body ctx in
   let rating = Json.get_field "rating" body |> Option.and_then ~fn:Json.get_int |> Option.unwrap_or ~default:0 in

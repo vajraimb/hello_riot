@@ -222,7 +222,7 @@ let parse_agent = fun fields ->
             |> Option.unwrap_or ~default:"";
           timeout_s =
             field fields "timeout_s" |> Option.and_then ~fn:Toml.get_int
-            |> Option.unwrap_or ~default:600;
+            |> Option.unwrap_or ~default:0;
           capabilities =
             field fields "capabilities" |> Option.and_then ~fn:str_list
             |> Option.unwrap_or ~default:[];

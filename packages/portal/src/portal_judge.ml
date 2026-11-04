@@ -69,7 +69,7 @@ let review = fun (config : Portal_config.t) ~judge ~(prompt : string) ~(answer :
         :: (match Portal_config.api_key_of acc with Some k -> [ ("Authorization", "Bearer " ^ k) ] | None -> [])
       in
       match
-        blocking_call ~connect_ip:acc.Portal_config.connect_ip ~scheme ~host
+        blocking_call ~connect_ip:acc.Portal_config.connect_ip ~timeout_s:300 ~scheme ~host
           ~port:(port_opt |> Option.unwrap_or ~default:443)
           ~path:(chat_path_of ~protocol:acc.Portal_config.protocol path_prefix)
           ~headers ~body ()

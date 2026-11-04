@@ -5,8 +5,9 @@ module Json = Std.Data.Json
 
 (** Local AI-agent adapters: run headless agent CLIs (Claude Code, opencode,
     gemini, codex) as subprocesses and expose their output as chat streams.
-    Agent subprocesses live on blocking lanes; a watchdog kills them on
-    timeout. *)
+    Agent subprocesses live on blocking lanes. They run until they exit or
+    are cancelled; a watchdog kills them only when [timeout_s] > 0 (set by
+    config or by the caller). *)
 
 type agent = {
   name: string;
@@ -33,6 +34,7 @@ type Message.t +=
   | Agent_line of int * string
   | Agent_done of int * int
   | Agent_timeout of int
+  | Agent_spawned of int * Process.t
 
 let contains_cap = fun (a : agent) cap ->
   List.any a.capabilities ~fn:(String.equal cap)
@@ -202,11 +204,28 @@ let spawn_proc = fun ~(agent : agent) ~args () ->
   let args = Array.init ~count:(List.length argv) ~fn:(fun i -> List.get_unchecked argv ~at:i) in
   Process.spawn ~program:"env" ~args ?current_dir:workdir ~stdio ()
 
-(** SIGKILL the process group led by [proc] (see [spawn_proc]). *)
+(* The tree is collected before anything is killed: agent CLIs (grok) run
+   tool commands in their own process groups, and once their parent dies
+   they are reparented to launchd and can no longer be found. *)
+let kill_tree_script =
+  {|my $root = shift;
+my %kids;
+if (open(my $ps, '-|', '/bin/ps', '-A', '-o', 'pid=,ppid=')) {
+  for (<$ps>) { my ($p, $pp) = split ' '; push @{$kids{$pp}}, $p }
+  close($ps);
+}
+my @todo = ($root);
+my @all;
+while (@todo) { my $p = shift @todo; push @all, $p; push @todo, @{$kids{$p} || []} }
+kill 'KILL', -$root;
+kill 'KILL', @all;|}
+
+(** SIGKILL the process group led by [proc] (see [spawn_proc]) and every
+    descendant, wherever its process group. *)
 let kill_group = fun (proc : Process.t) ->
   let stdio = { Process.stdin = Process.Stdin.Null; stdout = Process.Stdout.Null; stderr = Process.Stderr.Null } in
   (match
-     Process.spawn ~program:"/bin/kill" ~args:[| "-9"; "--"; "-" ^ Int.to_string (Process.pid proc) |] ~stdio ()
+     Process.spawn ~program:"/usr/bin/perl" ~args:[| "-e"; kill_tree_script; Int.to_string (Process.pid proc) |] ~stdio ()
    with
    | Error _ -> ()
    | Ok k ->
@@ -223,7 +242,8 @@ let kill_group = fun (proc : Process.t) ->
 
 let watchdog = fun ~(proc : Process.t) ~timeout_s ~to_pid ~leg ->
   (* SIGKILL the subprocess tree after [timeout_s]; runs on its own blocking lane *)
-  Runtime.spawn_blocked (fun () ->
+  if timeout_s <= 0 then () else
+  ignore @@ Runtime.spawn_blocked (fun () ->
     sleep (Time.Duration.from_secs (max 1 timeout_s));
     (match Process.try_wait proc with
      | Ok (Some (Process.Exited _ | Process.Signaled _)) -> ()
@@ -295,7 +315,7 @@ let exit_code = fun ~proc ->
 
 (** Synchronous collection; call ONLY from a blocking lane. [on_line] sees
     every raw stdout line (for step extraction by the caller). *)
-let collect = fun ?(on_line = fun (_ : string) -> ()) ~(agent : agent) ~model ~prompt () ->
+let collect = fun ?(on_line = fun (_ : string) -> ()) ?(on_spawn = fun (_ : Process.t) -> ()) ~(agent : agent) ~model ~prompt () ->
   let args =
     let arg_list = build_args agent ~model ~prompt in
     Array.init ~count:(List.length arg_list) ~fn:(fun i -> List.get_unchecked arg_list ~at:i)
@@ -303,7 +323,8 @@ let collect = fun ?(on_line = fun (_ : string) -> ()) ~(agent : agent) ~model ~p
   match spawn_proc ~agent ~args () with
   | Error e -> Error ("agent spawn failed: " ^ Process.error_to_string e)
   | Ok proc ->
-      let _ = watchdog ~proc ~timeout_s:agent.timeout_s ~to_pid:(self ()) ~leg:0 in
+      on_spawn proc;
+      watchdog ~proc ~timeout_s:agent.timeout_s ~to_pid:(self ()) ~leg:0;
       let buf = ref "" in
       let jn = Portal_steps.joiner () in
       let observe = on_line in
@@ -317,8 +338,10 @@ let collect = fun ?(on_line = fun (_ : string) -> ()) ~(agent : agent) ~model ~p
       let _ = Process.close proc in
       if code = 0 then
         Ok !buf
-      else if code = 137 then
+      else if code = 137 && agent.timeout_s > 0 then
         Error ("agent timeout (" ^ Int.to_string agent.timeout_s ^ "s)")
+      else if code = 137 then
+        Error "agent killed (SIGKILL)"
       else
         Error ("agent exited with code " ^ Int.to_string code)
 
@@ -334,7 +357,8 @@ let stream = fun ~(agent : agent) ~model ~prompt ~to_pid ~leg () ->
       send to_pid (Agent_done (leg, -1));
       Ok ()
   | Ok proc ->
-      let _ = watchdog ~proc ~timeout_s:agent.timeout_s ~to_pid ~leg in
+      send to_pid (Agent_spawned (leg, proc));
+      watchdog ~proc ~timeout_s:agent.timeout_s ~to_pid ~leg;
       let on_line line =
         send to_pid (Agent_line (leg, line))
       in

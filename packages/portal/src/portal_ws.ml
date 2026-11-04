@@ -85,7 +85,7 @@ let emit_attempt_finished = fun (state : state) ~(request_id : string) ~(account
            | Some e -> [ ("error", Json.string e) ]
            | None -> [])))
 
-let emit_task_done = fun ?(error = "") ?(answer = "") (state : state) ~(request_id : string) ~(chosen : string option) ~(attempts : int) ~(ok : bool) ->
+let emit_task_done = fun ?(cancelled = false) ?(error = "") ?(answer = "") (state : state) ~(request_id : string) ~(chosen : string option) ~(attempts : int) ~(ok : bool) ->
   broadcast_event
     state
     ~type_:"task_done"
@@ -97,6 +97,7 @@ let emit_task_done = fun ?(error = "") ?(answer = "") (state : state) ~(request_
            ("attempts", Json.int attempts);
            ("ok", Json.bool ok);
          ]
+        @ (if cancelled then [ ("cancelled", Json.bool true) ] else [])
         @ (if String.is_empty error then [] else [ ("error", Json.string (Portal_signals.redact_secrets error)) ])
         @ if String.is_empty answer then [] else [ ("answer", Json.string (Portal_steps.clip answer 60000)) ]))
 

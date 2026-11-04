@@ -92,7 +92,7 @@ body.resizing{cursor:col-resize;user-select:none}
 .task .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .task .m{grid-column:2;font-size:11.5px;color:var(--muted);display:flex;gap:8px;white-space:nowrap;overflow:hidden}
 .st{font-family:var(--mono);font-size:12px;line-height:20px;text-align:center}
-.st.ok{color:var(--ok)}.st.failed{color:var(--err)}.st.running{color:var(--accent)}
+.st.ok{color:var(--ok)}.st.failed{color:var(--err)}.st.running{color:var(--accent)}.st.cancelled{color:var(--muted)}
 .spin{display:inline-block;width:10px;height:10px;border:1.5px solid var(--accent);border-right-color:transparent;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-1px}
 @keyframes sp{to{transform:rotate(360deg)}}
 .tag{font-size:10.5px;padding:0 5px;border-radius:3px;border:1px solid var(--line2);color:var(--muted);line-height:16px}
@@ -112,6 +112,9 @@ body.resizing{cursor:col-resize;user-select:none}
 .pill{font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px}
 .pill.ok{background:rgba(63,185,80,.14);color:var(--ok)}
 .pill.failed{background:rgba(248,81,73,.14);color:var(--err)}
+.pill.cancelled{background:rgba(139,148,158,.14);color:var(--muted)}
+.stopbtn{background:none;border:1px solid rgba(248,81,73,.5);border-radius:4px;color:var(--err);padding:0 8px;line-height:20px;cursor:pointer;font-size:12px}
+.stopbtn:hover{background:rgba(248,81,73,.12)}
 .pill.running{background:rgba(91,140,255,.15);color:var(--accent2)}
 .route{margin-top:10px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);font-size:12.5px;display:flex;gap:8px}
 .route .k{color:var(--muted);flex:none}
@@ -477,7 +480,7 @@ async function loadList() {
 }
 function statusGlyph(st) {
   if (st === 'running') return '<span class="spin"></span>';
-  return st === 'ok' ? '✓' : '✗';
+  return st === 'ok' ? '✓' : st === 'cancelled' ? '■' : '✗';
 }
 function visibleTasks() {
   return S.tasks.filter(t => S.filter === 'all' || t.status === S.filter);
@@ -504,6 +507,14 @@ function select(id) {
 }
 
 /* ---------- detail ---------- */
+async function stopTask(id) {
+  try {
+    const r = await fetch('/api/feed/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+    const j = await r.json();
+    toast(r.ok ? '已发出停止' : (j.error || '停止失败'));
+    loadDetail(false);
+  } catch (e) { toast('停止失败'); }
+}
 async function rate(id, rating) {
   try {
     const r = await fetch('/api/feed/rate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, rating }) });
@@ -547,7 +558,7 @@ function renderDetail(scrollEnd) {
   const prevScroll = box.querySelector('.scroll');
   const atBottom = prevScroll ? (prevScroll.scrollHeight - prevScroll.scrollTop - prevScroll.clientHeight < 40) : true;
   const keepTop = prevScroll ? prevScroll.scrollTop : 0;
-  const stTxt = { running: '进行中', ok: '完成', failed: '失败' }[d.status] || d.status;
+  const stTxt = { running: '进行中', ok: '完成', failed: '失败', cancelled: '已停止' }[d.status] || d.status;
   const ref = S.refs[d.id];
   const answer = (ref && S.localAnswers[ref]) || d.answer || '';
   const nSteps = (d.timeline || []).filter(e => e.kind === 'step' && (e.step === 'tool')).length;
@@ -562,6 +573,7 @@ function renderDetail(scrollEnd) {
         '<span>来源 ' + esc(SRC[d.source] || d.source) + '</span>' +
         '<span class="mono dim" style="cursor:pointer" title="复制 request id" onclick="copy(\'' + esc(d.id) + '\')">' + esc(d.id) + '</span>' +
         (d.review_score ? '<span title="' + esc((d.reviewer || '') + '：' + (d.review_reason || '')) + '">抽检 <b>' + d.review_score + '/5</b></span>' : '') +
+        (d.status === 'running' ? '<button class="stopbtn" title="结束这个任务：杀掉 agent 进程 / 放弃等待上游，不换下一个候选，也不扣执行者的健康分" onclick="stopTask(\'' + esc(d.id) + '\')">■ 停止</button>' : '') +
         (d.status === 'ok' && d.executor ? '<span class="rate" title="你的评价会计入 ' + esc(d.executor) + ' 在这类任务上的质量分，影响以后的路由">' +
           '<button class="' + (d.user_rating > 0 ? 'on' : '') + '" onclick="rate(\'' + esc(d.id) + '\',' + (d.user_rating > 0 ? 0 : 1) + ')">👍</button>' +
           '<button class="' + (d.user_rating < 0 ? 'on' : '') + '" onclick="rate(\'' + esc(d.id) + '\',' + (d.user_rating < 0 ? 0 : -1) + ')">👎</button></span>' : '') +
@@ -626,7 +638,7 @@ function renderTimeline(d) {
           (e.ok ? ' 作答 · ' + fmtDur(e.latency_ms) + clampText(e.text || '', d.id + ':m:' + e.account) : ' <span class="hl">未能作答：' + esc(e.hint || e.error || '') + '</span>'));
         break;
       case 'rating': row('ok', e, '★', '<span class="lbl">评价</span>' + esc(e.text)); break;
-      case 'done': row(e.ok ? 'ok' : 'bad', e, '■', e.ok ? '任务完成' : '<span class="hl">任务失败' + (e.error ? '：' + esc(e.error) : '') + '</span>'); break;
+      case 'done': row(e.ok ? 'ok' : 'bad', e, '■', e.ok ? '任务完成' : d.status === 'cancelled' ? '<span class="hl">' + esc(e.error || '已停止') + '</span>' : '<span class="hl">任务失败' + (e.error ? '：' + esc(e.error) : '') + '</span>'); break;
       case 'step': {
         const ag = e.agent ? ' <span class="dim mono" style="font-size:11px">' + esc(e.agent) + '</span>' : '';
         if (e.step === 'thinking') row('think', e, '…', '<span class="lbl">思考</span>' + ag + clampText(e.text, d.id + ':' + i));

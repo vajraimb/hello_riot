@@ -100,8 +100,10 @@ let upstream_call = fun ?connect_ip ~scheme ~host ~port ~path ~headers ~body () 
         | Ok (resp, body_str) -> Ok (resp.Portal_client.status, body_str, latency_ms)
       )
 
-(** Run an outbound request on a dedicated blocking lane; wait up to 60s. *)
-let blocking_call = fun ?connect_ip ?(timeout_s = 60) ~scheme ~host ~port ~path ~headers ~body () ->
+(** Run an outbound request on a dedicated blocking lane. Waits until the
+    upstream answers unless [timeout_s] is given; a [Task_cancel] sent to the
+    calling actor ends the wait with [cancel_error]. *)
+let blocking_call = fun ?connect_ip ?timeout_s ~scheme ~host ~port ~path ~headers ~body () ->
   let reply_to = self () in
   let _ =
     Runtime.spawn_blocked (fun () ->
@@ -112,10 +114,14 @@ let blocking_call = fun ?connect_ip ?(timeout_s = 60) ~scheme ~host ~port ~path 
   let selector msg =
     match msg with
     | Upstream_result r -> Select r
+    | Task_cancel reason -> Select (Error (cancel_error reason))
     | _ -> Skip
   in
-  try receive ~selector ~timeout:(Time.Duration.from_secs timeout_s) ()
-  with Receive_timeout -> Error ("upstream timeout (" ^ Int.to_string timeout_s ^ "s)")
+  match timeout_s with
+  | None -> receive ~selector ()
+  | Some t -> (
+      try receive ~selector ~timeout:(Time.Duration.from_secs t) ()
+      with Receive_timeout -> Error ("upstream timeout (" ^ Int.to_string t ^ "s)"))
 
 (** Outbound streaming request on a blocking lane: body chunks and failures
     are reported to [to_pid] as messages. *)

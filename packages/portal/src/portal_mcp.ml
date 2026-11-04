@@ -138,7 +138,7 @@ let tools_list = fun () ->
                     ("category", str_prop ~required:false ~description:"Task category used for agent fit scoring (default coding).");
                     ("agent", str_prop ~required:false ~description:"Force a specific agent by name (optional).");
                     ("mode", str_prop ~required:false ~description:"async (default, returns task_id immediately) or sync (waits, may exceed client timeouts).");
-                    ("timeout_s", int_prop ~description:"Agent timeout in seconds (default from config).");
+                    ("timeout_s", int_prop ~description:"Optional hard limit in seconds; by default the agent runs until it finishes or is cancelled.");
                     ("workdir", str_prop ~required:false ~description:"Absolute directory to run the agent in; must be inside the agent's allowed_workdirs (default: the agent's configured workdir).");
                   ]
               );

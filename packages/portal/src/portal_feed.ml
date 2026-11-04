@@ -139,7 +139,10 @@ let category_text = fun c ->
 let error_text = fun (err : string) ->
   let e = String.lowercase_ascii err in
   let has s = String.contains e s in
-  if has "empty_answer_reasoning_exhausted" then
+  if String.starts_with ~prefix:"cancelled:timeout" e then "到了调用方设定的时限，已停止"
+  else if String.starts_with ~prefix:"cancelled:" e then "已手动停止"
+  else if has "upstream_stream_timeout" then "上游连接 120 秒没有任何数据，判定断线"
+  else if has "empty_answer_reasoning_exhausted" then
     "思考用完了 max_tokens 仍没给出回答（推理模型常见），已换下一个候选"
   else if has "empty_answer" then "正常结束但没有输出任何回答，已换下一个候选"
   else if has "exited with code" then
@@ -400,7 +403,10 @@ let apply_event = fun (t : task) ~type_ (data : Json.t) ->
         {
           t with
           answer;
-          status = (if ok then "ok" else "failed");
+          status =
+            (if ok then "ok"
+             else if Json.get_field "cancelled" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false then "cancelled"
+             else "failed");
           finished_ms = now_ms ();
           executor = (if String.equal chosen "none" then t.executor else chosen);
           error;

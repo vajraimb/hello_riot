@@ -120,6 +120,18 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
               in
               (
                 match call_result with
+                | Error err when Option.is_some (cancel_reason_of err) ->
+                    let reason = cancel_reason_of err |> Option.unwrap_or ~default:"user" in
+                    let _ = Portal_signals.update state.signals name ~fn:Portal_signals.release_in_flight in
+                    emit_attempt_finished state ~request_id ~account:name ~status:None ~latency_ms:0 ~error:(Some err);
+                    let decision' = { decision with Portal_router.attempts = List.rev acc } in
+                    record_decision state decision';
+                    emit_task_done ~cancelled:true ~error:(cancel_text reason) state ~request_id ~chosen:None ~attempts:(List.length acc + 1) ~ok:false;
+                    {
+                      cst_status = 499;
+                      cst_body = Json.to_string (Json.obj [ ("error", Json.string err); ("message", Json.string (cancel_text reason)) ]);
+                      cst_decision = decision';
+                    }
                 | Error err ->
                     emit_attempt_finished state ~request_id ~account:name ~status:None ~latency_ms:0 ~error:(Some err);
                     let _ = apply_failure state config ~account:name ~status:None ~body:"" ~err in
@@ -288,6 +300,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
     |> Option.unwrap_or ~default:config.Portal_config.policy.Portal_config.goal
   in
   let request_id = new_request_id () in
+  (match header_timeout ctx with Some secs -> arm_deadline state ~request_id ~secs | None -> ());
   audit_log
     state
     ~path:"/v1/chat/completions"
@@ -477,37 +490,38 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
           extra;
         }
       in
-      let _ =
+      let conductor =
         spawn
           (run_conductor cc ~candidates ~parent:(self ()))
       in
+      watch_task state ~pid:conductor ~request_id ();
       let selector msg =
         match msg with
         | Conductor_done r -> Select r
         | _ -> Skip
       in
-      try
-        receive
-          ~selector
-          ~timeout:(Time.Duration.from_secs 300)
-          ()
-      with
-      | Receive_timeout ->
-          Error "stream total timeout (300s)")
+      let r = receive ~selector () in
+      unwatch_task state ~request_id;
+      r)
   else
     let r =
-      execute_chat_sync
-        state
-        config
-        ~decision
-        ~candidates
-        ~model
-        ~messages:(Json.get_field "messages" body |> Option.unwrap_or ~default:(Json.array []))
-        ~max_tokens
-        ~extra
-        ~session
-        ~request_id
-        ()
+      watch_task state ~request_id ();
+      let r =
+        execute_chat_sync
+          state
+          config
+          ~decision
+          ~candidates
+          ~model
+          ~messages:(Json.get_field "messages" body |> Option.unwrap_or ~default:(Json.array []))
+          ~max_tokens
+          ~extra
+          ~session
+          ~request_id
+          ()
+      in
+      unwatch_task state ~request_id;
+      r
     in
     match Json.from_string r.cst_body with
     | Ok j ->

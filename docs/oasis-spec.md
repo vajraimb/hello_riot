@@ -182,7 +182,13 @@ EMA 与样本数持久化到 `.oasis-data/latency.json`（每个 `task_done` 写
 
 ### 2.4 执行与容错
 
-- **非流式**：按回退链逐个尝试（blocking lane + 超时），全程记账/信号/决策记录
+- **任务时长不由 Oasis 决定**：账户调用与 agent 都跑到完成为止，Oasis 不设总时限。只有两种方式提前结束——
+  调用方用 `X-Oasis-Timeout: <秒>`（MCP 为 `timeout_s`）给出时限，或用户在控制台点「■ 停止」
+  （`POST /api/feed/cancel {"id"}`）。两者都走同一条取消路径：杀掉 agent 进程树 / 放弃等待上游，
+  **不换下一个候选、不扣执行者健康分**，任务状态为 `cancelled`，返回 499（流式以 `oasis_cancelled` 错误 + `[DONE]` 收尾）。
+  仍保留的只有"连接已死"判定：流式上游 120s 没有任何字节视为断线（这是健康检查，不是时长限制）。
+  agent 的 `timeout_s` 默认 0（不限）；配置了正数才会有看门狗。Oasis 自己的后台抽检（judge）单次 300s 上限
+- **非流式**：按回退链逐个尝试（blocking lane），全程记账/信号/决策记录
 - **流式（账户）**：导体 actor 管理当前 leg；上游断流/错误 → 触发 handoff（§3）。
   正常结束 = `data: [DONE]`，或收到非空 `finish_reason` 后上游关闭（Perplexity 不发 `[DONE]`）；
   两者都没有就关闭视为断流
@@ -196,7 +202,8 @@ EMA 与样本数持久化到 `.oasis-data/latency.json`（每个 `task_done` 写
   的 JSON 事件流解析成工作步骤（`thinking` / `text` / `tool` / `tool_result` / `usage`），非 JSON 行与未知 CLI
   按纯文本处理。只有 `text` 进入客户端 delta（末尾 `result` 是全文重复，丢弃；整条消息之间、工具调用后续写的
   文字之间插空行）；思考与工具步骤**不进回答**，作为 `agent_step` 事件广播给控制台（§2.6）。
-  心跳保活（10s 空 chunk）；看门狗 SIGKILL 兜底：子进程由 perl 包装成为进程组组长，超时杀整个进程组
+  心跳保活（10s 空 chunk）；取消或（配置了 `timeout_s` 时）看门狗 SIGKILL：子进程由 perl 包装成为进程组组长，
+  杀的是**整棵进程树**——先按 ppid 收集全部后代再杀，因为 grok 等 CLI 把工具命令放进各自独立的进程组，只杀组会留下仍在跑的工具进程
   （gemini 等 CLI 会 re-exec 出子 node 进程，只杀父进程会留下孤儿）。perl 包装在 agent 退出后**清理同组残留进程**
   再以 agent 的退出码退出——cursor-agent 会留下继承了 stdout 的后台 worker-server，不清理则管道永不 EOF，
   任务永远"进行中"。调用方中途断开时任务以失败结束（`task_done.error` 说明结果未送达）
@@ -204,7 +211,7 @@ EMA 与样本数持久化到 `.oasis-data/latency.json`（每个 `task_done` 写
   running/done/failed——解决"MCP 客户端超时 < agent 执行时长"的矛盾
 - **指定 agent**（`X-Oasis-Agent: <name>`）：强制 agent 模式，只用这一个 agent——不探索、不替换，
   它不可用就直接失败（控制台：Agent 模式下类别选「自选」）
-- **委员会**（`X-Oasis-Committee: a,b[,c]`，2–3 个 API 账户，去重）：各成员并行做一次非流式调用（单个 240s 超时），
+- **委员会**（`X-Oasis-Committee: a,b[,c]`，2–3 个 API 账户，去重）：各成员并行做一次非流式调用（不设时限，可停止），
   每家答完即推 `committee_member` 事件；≥2 家成功后按 `analysis` 类别 + 请求的 goal 由路由器挑汇总模型
   （可以是成员之一，失败按回退链换下一个），回答 = `## 汇总（X）` + 汇总 + 各家原文；只有 1 家成功则直接返回原文，
   全失败 502。始终非流式返回，`oasis` 字段列出成员成败与汇总者（控制台：问答模式下类别选「委员会」，多选成员）

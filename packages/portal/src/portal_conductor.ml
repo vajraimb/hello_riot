@@ -586,9 +586,33 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
         | Upstream_failed (leg, e) when leg = cs.leg_id -> Select (`Failed e)
         | Upstream_head (leg, s, b) when leg = cs.leg_id -> Select (`Head (s, b))
         | Upstream_ended leg when leg = cs.leg_id -> Select `Leg_end
+        | Task_cancel reason -> Select (`Cancel reason)
         | _ -> Skip
       in
+      (* 120s without a single byte means the connection is dead; it is not
+         a limit on how long the answer may take *)
       match receive ~selector ~timeout:(Time.Duration.from_secs 120) () with
+      | `Cancel reason ->
+          flush_thinking ();
+          cs.finished <- true;
+          let latency_ms = Time.Duration.to_millis (Time.Instant.elapsed cs.leg_start) in
+          let err = cancel_error reason in
+          if not (String.is_empty cs.current_account) then (
+            let _ = Portal_signals.update cc.c_state.signals cs.current_account ~fn:Portal_signals.release_in_flight in
+            cs.attempts <-
+              { Portal_router.account = cs.current_account; model = cs.current_model; status = None; error = Some err; latency_ms; cost_nano = 0 }
+              :: cs.attempts;
+            emit_attempt_finished cc.c_state ~request_id:cc.request_id ~account:cs.current_account ~status:None ~latency_ms ~error:(Some err));
+          close_open_handoff ~unresolved:"G0";
+          record_decision cc.c_state (decision_now ());
+          emit_task_done ~cancelled:true ~error:(cancel_text reason) ~answer:cs.sent_text cc.c_state ~request_id:cc.request_id ~chosen:None
+            ~attempts:(List.length cs.attempts) ~ok:false;
+          let payload =
+            Json.obj [ ("error", Json.obj [ ("message", Json.string (cancel_text reason)); ("type", Json.string "oasis_cancelled") ]) ]
+          in
+          let _ = write_stream cc.client_stream ("data: " ^ Json.to_string payload ^ "\n\n") in
+          let _ = write_stream cc.client_stream "data: [DONE]\n\n" in
+          send parent (Conductor_done (Ok ()))
       | `Chunk c ->
           handle_chunk c;
           loop ()

@@ -3279,6 +3279,49 @@ let test_gateway_committee = fun _ctx ->
         )
     )
 
+let chat_body = fun text ->
+  Json.to_string
+    (Json.obj [ ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string text) ] ]) ])
+
+let test_gateway_client_deadline_accounts = fun _ctx ->
+  match start_mocks 2 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      List.for_each mocks ~fn:(fun m ->
+        Mock.set_scenario m
+          { (Mock.default_scenario) with body = openai_ok_body ~content:"late"; sse = [ "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n"; "data: [DONE]\n\n" ]; delay_ms = 3000 });
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let t0 = Portal.Signals.now_ms () in
+          match
+            gw_post ~port:gw.port ~path:"/v1/chat/completions"
+              ~headers:[ ("Content-Type", "application/json"); ("X-Oasis-Timeout", "1") ] ~body:(chat_body "q")
+          with
+          | Error e -> Error e
+          | Ok (status, resp) -> (
+              Test.assert_equal ~expected:499 ~actual:status;
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "cancelled:timeout:1");
+              Test.assert_equal ~expected:true ~actual:(Portal.Signals.now_ms () - t0 < 2800);
+              let stream_body =
+                Json.to_string
+                  (Json.obj
+                    [ ("stream", Json.bool true); ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "q") ] ]) ])
+              in
+              match
+                gw_post ~port:gw.port ~path:"/v1/chat/completions"
+                  ~headers:[ ("Content-Type", "application/json"); ("X-Oasis-Timeout", "1") ] ~body:stream_body
+              with
+              | Error e -> Error e
+              | Ok (_, sresp) -> (
+                  Test.assert_equal ~expected:true ~actual:(String.contains sresp "oasis_cancelled");
+                  Test.assert_equal ~expected:false ~actual:(String.contains sresp "late");
+                  match gw_get ~port:gw.port ~path:"/api/feed?limit=5" with
+                  | Error e -> Error e
+                  | Ok (_, feed) ->
+                      Test.assert_equal ~expected:true ~actual:(String.contains feed "\"status\":\"cancelled\"");
+                      Ok ()))))
+
 let test_upstream_body_max_tokens_passthrough = fun _ctx ->
   let messages = Json.array [] in
   let has_max b = String.contains b "max_tokens" in
@@ -3730,6 +3773,42 @@ let test_agent_timeout_kills_process_tree = fun _ctx ->
           Ok ()
     )
 
+let test_gateway_agent_runs_until_cancelled = fun _ctx ->
+  let config =
+    mk_config_agents
+      ~accounts:[ mk_account "acc_api" ]
+      ~agents:[ mk_agent ~args:[ "-c"; "/usr/bin/perl -e 'setpgrp(0,0); exec \"sleep\", \"31\"' & echo $! > /tmp/oasis-cancel-child.pid; wait" ] ~timeout_s:0 "agent_slow" ]
+      ~kb:[ mk_kb_model "m-x" ]
+      ~routes:[]
+      ~max_fallback:1
+  in
+  match Gateway.start ~config_path:None ~config ~port:0 () with
+  | Error e -> Error ("gateway: " ^ e)
+  | Ok gw -> (
+      let t0 = Portal.Signals.now_ms () in
+      match
+        gw_post ~port:gw.port ~path:"/v1/chat/completions"
+          ~headers:[ ("Content-Type", "application/json"); ("X-Oasis-Agent", "agent_slow"); ("X-Oasis-Timeout", "1") ]
+          ~body:(chat_body "q")
+      with
+      | Error e -> Error e
+      | Ok (status, resp) -> (
+          Test.assert_equal ~expected:499 ~actual:status;
+          Test.assert_equal ~expected:true ~actual:(String.contains resp "cancelled:timeout:1");
+          Test.assert_equal ~expected:true ~actual:(Portal.Signals.now_ms () - t0 < 8000);
+          sleep (Time.Duration.from_millis 300);
+          (match Fs.read_to_string (Path.from_string "/tmp/oasis-cancel-child.pid" |> Result.unwrap) with
+           | Ok pid ->
+               let _ = Fs.remove_file (Path.from_string "/tmp/oasis-cancel-child.pid" |> Result.unwrap) in
+               (* the child left the agent's process group, like grok's tool shells *)
+               Test.assert_equal ~expected:false ~actual:(pid_alive (String.trim pid))
+           | Error _ -> Test.assert_equal ~expected:"child pid file" ~actual:"missing");
+          match gw_post ~port:gw.port ~path:"/api/feed/cancel" ~headers:[ ("Content-Type", "application/json") ] ~body:"{\"id\":\"req-none\"}" with
+          | Error e -> Error e
+          | Ok (st, _) ->
+              Test.assert_equal ~expected:404 ~actual:st;
+              Ok ()))
+
 let test_agent_exit_reaps_lingering_helpers = fun _ctx ->
   let cwd = Env.current_dir () |> Result.unwrap |> Path.to_string in
   let script = cwd ^ "/packages/portal/tests/fixtures/agent_linger.sh" in
@@ -3808,6 +3887,8 @@ let tests =
     case "quality: ratings blend into fit" test_quality_blend;
     case "committee: members and feed events" test_committee_members_and_feed;
     case "gateway: committee answers and synthesis" test_gateway_committee;
+    case ~size:Test.Large "gateway: caller deadline cancels account calls without failover" test_gateway_client_deadline_accounts;
+    case ~size:Test.Large "gateway: agents run until cancelled" test_gateway_agent_runs_until_cancelled;
     case "router: exploration promotes the least-measured" test_router_explore;
     case "judge: verdict and spec parsing" test_judge_parse;
     case "feed: ratings, review and final answer" test_feed_ratings_and_answer;

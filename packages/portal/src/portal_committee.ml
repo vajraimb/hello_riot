@@ -14,9 +14,6 @@ open Portal_ws
 open Portal_upstream
 open Portal_decisions
 
-(* reasoning models can think for minutes before answering *)
-let member_timeout_s = 240
-
 let min_members = 2
 
 let max_members = 3
@@ -53,11 +50,14 @@ let call_account = fun (state : state) (config : Portal_config.t) ~(name : strin
       let headers = ("Content-Type", "application/json") :: ("Host", host) :: ("Connection", "close") :: auth_headers in
       let _ = Portal_signals.update state.signals name ~fn:Portal_signals.mark_in_flight in
       match
-        blocking_call ~connect_ip:account.Portal_config.connect_ip ~timeout_s:member_timeout_s ~scheme ~host
+        blocking_call ~connect_ip:account.Portal_config.connect_ip ~scheme ~host
           ~port:(port_opt |> Option.unwrap_or ~default:443)
           ~path:(chat_path_of ~protocol:account.Portal_config.protocol path_prefix)
           ~headers ~body:req_body ()
       with
+      | Error err when Option.is_some (cancel_reason_of err) ->
+          let _ = Portal_signals.update state.signals name ~fn:Portal_signals.release_in_flight in
+          Error err
       | Error err ->
           let _ = apply_failure state config ~account:name ~status:None ~body:"" ~err in
           Error err
@@ -135,13 +135,21 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
       emit_attempt_started state ~request_id ~account:name;
       let _ = spawn (fun () -> send parent (Committee_answer (i, call_account state config ~name ~messages)); Ok ()) in
       ());
-    let selector msg = match msg with Committee_answer (i, r) -> Select (i, r) | _ -> Skip in
+    let selector msg =
+      match msg with
+      | Committee_answer (i, r) -> Select (`Answer (i, r))
+      | Task_cancel reason -> Select (`Cancel reason)
+      | _ -> Skip
+    in
+    let cancelled = ref None in
     let rec collect acc remaining =
       if remaining = 0 then acc
       else
-        match receive ~selector ~timeout:(Time.Duration.from_secs (member_timeout_s + 15)) () with
-        | exception Receive_timeout -> acc
-        | (i, r) ->
+        match receive ~selector () with
+        | `Cancel reason ->
+            cancelled := Some reason;
+            acc
+        | `Answer (i, r) ->
             let name = List.get_unchecked members ~at:i in
             (
               match r with
@@ -156,6 +164,7 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
             );
             collect ((i, r) :: acc) (remaining - 1)
     in
+    watch_task state ~request_id ();
     let results = collect [] n in
     let per_member =
       List.enumerate members
@@ -178,12 +187,21 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
         (List.map per_member ~fn:(fun (name, r) ->
           Json.obj [ ("account", Json.string name); ("ok", Json.bool (match r with Ok _ -> true | Error _ -> false)) ]))
     in
+    let cancelled_reply reason =
+      unwatch_task state ~request_id;
+      emit_task_done ~cancelled:true ~error:(cancel_text reason) ~answer:sections state ~request_id ~chosen:None ~attempts:n ~ok:false;
+      Trail.json ~status:(Net.Http.Status.from_int 499) ctx
+        (Json.obj [ ("error", Json.string (cancel_error reason)); ("message", Json.string (cancel_text reason)); ("members", members_json) ])
+    in
     match answered with
+    | _ when Option.is_some !cancelled -> cancelled_reply (Option.unwrap_or !cancelled ~default:"user")
     | [] ->
+        unwatch_task state ~request_id;
         let msg = "委员会成员都没能作答" in
         emit_task_done ~error:msg state ~request_id ~chosen:None ~attempts:n ~ok:false;
         Trail.json ~status:Net.Http.Status.BadGateway ctx (Json.obj [ ("error", Json.string msg); ("members", members_json) ])
     | [ (only, _) ] ->
+        unwatch_task state ~request_id;
         let content = "只有 " ^ only ^ " 给出了回答，无需汇总。\n\n" ^ sections in
         emit_task_done ~answer:content state ~request_id ~chosen:(Some only) ~attempts:n ~ok:true;
         Trail.json ctx (completion_json ~request_id ~content [ ("oasis", Json.obj [ ("members", members_json) ]) ])
@@ -205,12 +223,21 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
               | Ok (text, latency_ms) ->
                   emit_attempt_finished state ~request_id ~account:name ~status:(Some 200) ~latency_ms ~error:None;
                   Some (name, text)
+              | Error e when Option.is_some (cancel_reason_of e) ->
+                  emit_attempt_finished state ~request_id ~account:name ~status:None ~latency_ms:0 ~error:(Some e);
+                  cancelled := cancel_reason_of e;
+                  None
               | Error e ->
                   emit_attempt_finished state ~request_id ~account:name ~status:None ~latency_ms:0 ~error:(Some e);
                   synthesize rest)
         in
+        let summary = synthesize candidates in
+        unwatch_task state ~request_id;
+        match !cancelled with
+        | Some reason -> cancelled_reply reason
+        | None ->
         let (chosen, content) =
-          match synthesize candidates with
+          match summary with
           | Some (s, text) -> (s, "## 汇总（" ^ s ^ "）\n\n" ^ text ^ "\n\n---\n\n" ^ sections)
           | None ->
               let first = match answered with (name, _) :: _ -> name | [] -> "committee" in

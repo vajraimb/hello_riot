@@ -15,6 +15,7 @@ type Message.t +=
   | Upstream_ended of int
   | Conductor_done of (unit, string) result
   | Committee_answer of int * (string * int, string) result
+  | Task_cancel of string
 
 type state = {
   config_path: string option;
@@ -31,7 +32,61 @@ type state = {
   feed: Portal_feed.t;
   quality: Portal_quality.t;
   route_turns: int Sync.Atomic.t;
+  running: (string, Pid.t) ConcurrentHashMap.t;
 }
+
+(* ---------- cancellation ---------- *)
+
+(** [Task_cancel] reasons: "user" (stop button / API) or "timeout:<secs>"
+    (deadline the caller asked for via X-Oasis-Timeout). Oasis itself never
+    imposes a task deadline. *)
+let watch_task = fun (state : state) ?pid ~request_id () ->
+  if not (String.is_empty request_id) then
+    let pid = match pid with Some p -> p | None -> self () in
+    ignore (ConcurrentHashMap.insert state.running ~key:request_id ~value:pid)
+
+let unwatch_task = fun (state : state) ~request_id ->
+  ignore (ConcurrentHashMap.remove state.running ~key:request_id)
+
+let is_running = fun (state : state) ~request_id ->
+  Option.is_some (ConcurrentHashMap.get state.running ~key:request_id)
+
+let cancel_task = fun (state : state) ~request_id ~reason ->
+  match ConcurrentHashMap.get state.running ~key:request_id with
+  | None -> false
+  | Some pid ->
+      send pid (Task_cancel reason);
+      true
+
+let cancel_error = fun reason -> "cancelled:" ^ reason
+
+let cancel_reason_of = fun err ->
+  if String.starts_with ~prefix:"cancelled:" err then
+    Some (String.sub err ~offset:10 ~len:(String.length err - 10))
+  else None
+
+let cancel_text = fun reason ->
+  if String.starts_with ~prefix:"timeout:" reason then
+    "超过调用方设定的时限（" ^ String.sub reason ~offset:8 ~len:(String.length reason - 8) ^ "s），已停止"
+  else "已手动停止"
+
+(** Arms the caller's X-Oasis-Timeout: cancels the task after [secs] if it
+    is still running then. *)
+let arm_deadline = fun (state : state) ~request_id ~secs ->
+  if secs > 0 then
+    ignore
+      (spawn (fun () ->
+        (try
+           let (_ : unit) = receive ~selector:(fun _ -> Skip) ~timeout:(Time.Duration.from_secs secs) () in
+           ()
+         with Receive_timeout -> ());
+        ignore (cancel_task state ~request_id ~reason:("timeout:" ^ Int.to_string secs));
+        Ok ()))
+
+let header_timeout = fun (ctx : Trail.ctx) ->
+  Net.Http.Request.get_header ctx.req "x-oasis-timeout"
+  |> Option.and_then ~fn:(fun s -> Int.from_string_opt (String.trim s))
+  |> Option.and_then ~fn:(fun n -> if n > 0 then Some n else None)
 
 (* ---------- helpers ---------- *)
 

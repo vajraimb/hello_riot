@@ -66,6 +66,7 @@ let start = fun ~config_path ?(config : Portal_config.t option) ~port () ->
           feed = Portal_feed.create ();
           quality = Portal_quality.create ();
           route_turns = Sync.Atomic.make 0;
+          running = ConcurrentHashMap.with_capacity ~size:64;
         }
       in
       load_decision_history state;

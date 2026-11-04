@@ -132,7 +132,6 @@ let blocking_agent_call = fun ?on_line ~agent ~model ~prompt ->
     ~agent
     ~model
     ~prompt
-    ~timeout_s:agent.Portal_agent.timeout_s
     ()
 
 let agent_result_json = fun ~agent ~text ->
@@ -269,6 +268,8 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
           )
       in
       Trail.stream ctx (fun client_stream ->
+        watch_task state ~request_id ();
+        let proc = ref None in
         let finished = ref false in
         let released = ref false in
         let release_slot () =
@@ -386,9 +387,35 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
               | Portal_agent.Agent_line (_, line) -> Select (`Line line)
               | Portal_agent.Agent_done (_, code) -> Select (`Done code)
               | Portal_agent.Agent_timeout _ -> Select `Timeout
+              | Portal_agent.Agent_spawned (_, p) -> Select (`Spawned p)
+              | Task_cancel reason -> Select (`Cancel reason)
               | _ -> Skip
             in
             match receive ~selector ~timeout:(Time.Duration.from_secs 10) () with
+            | `Spawned p ->
+                proc := Some p;
+                loop ()
+            | `Cancel reason ->
+                finished := true;
+                (match !proc with
+                 | Some p -> ignore (Runtime.spawn_blocked (fun () -> Portal_agent.kill_group p; Ok ()))
+                 | None -> ());
+                release_slot ();
+                let err = cancel_error reason in
+                let latency_ms = Time.Duration.to_millis (Time.Instant.elapsed !t0) in
+                attempts :=
+                  { Portal_router.account = !current; model = !current; status = None; error = Some err; latency_ms; cost_nano = 0 }
+                  :: !attempts;
+                emit_attempt_finished state ~request_id ~account:!current ~status:None ~latency_ms ~error:(Some err);
+                record_decision state { decision with Portal_router.attempts = List.rev !attempts };
+                emit_task_done ~cancelled:true ~error:(cancel_text reason) ~answer:!sent state ~request_id ~chosen:None
+                  ~attempts:(List.length !attempts) ~ok:false;
+                let payload =
+                  Json.obj [ ("error", Json.obj [ ("message", Json.string (cancel_text reason)); ("type", Json.string "oasis_cancelled") ]) ]
+                in
+                let _ = write_stream client_stream ("data: " ^ Json.to_string payload ^ "\n\n") in
+                let _ = write_stream client_stream "data: [DONE]\n\n" in
+                ()
             | `Line line -> (
                 let text, steps =
                   Portal_agent.consume_line
@@ -423,8 +450,7 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
                   loop ()
             | exception Receive_timeout ->
                 (* heartbeat: agent may work silently for minutes (tool
-                   runs); the watchdog kills the subprocess at
-                   agent.timeout_s so we just keep the stream alive *)
+                   runs); it runs until it exits or the task is cancelled *)
                 (match
                   write_stream
                     client_stream
@@ -436,6 +462,7 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
           )
         in
         loop ();
+        unwatch_task state ~request_id;
         (* client disconnected or stream ended without a finish event:
            release the in-flight slot (not the agent's fault) *)
         release_slot ();
@@ -492,7 +519,7 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
                         Portal_signals.update state.signals nm ~fn:(fun s ->
                           Portal_signals.record_success s ~latency_ms ~tokens:(String.length text / 4) (Portal_signals.now_ms ()))
                       in
-                      emit_task_done state ~request_id ~chosen:(Some nm) ~attempts:(List.length acc + 1) ~ok:true;
+                      emit_task_done ~answer:text state ~request_id ~chosen:(Some nm) ~attempts:(List.length acc + 1) ~ok:true;
                       let attempt =
                         { Portal_router.account = nm; model = nm; status = Some 200; error = None; latency_ms; cost_nano = 0 }
                       in
@@ -505,6 +532,16 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
                       in
                       record_decision state decision';
                       Trail.json ctx (agent_result_json ~agent ~text)
+                  | Error err when Option.is_some (cancel_reason_of err) ->
+                      let reason = cancel_reason_of err |> Option.unwrap_or ~default:"user" in
+                      let _ = Portal_signals.update state.signals nm ~fn:Portal_signals.release_in_flight in
+                      let attempts = List.rev ({ Portal_router.account = nm; model = nm; status = None; error = Some err; latency_ms; cost_nano = 0 } :: acc) in
+                      record_decision state { decision with Portal_router.attempts };
+                      emit_task_done ~cancelled:true ~error:(cancel_text reason) state ~request_id ~chosen:None ~attempts:(List.length attempts) ~ok:false;
+                      Trail.json
+                        ~status:(Net.Http.Status.from_int 499)
+                        ctx
+                        (Json.obj [ ("error", Json.string err); ("message", Json.string (cancel_text reason)) ])
                   | Error err ->
                       let _ =
                         Portal_signals.update state.signals nm ~fn:(fun s ->
@@ -516,4 +553,7 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
                 )
           )
       in
-      try_agents [] candidates
+      watch_task state ~request_id ();
+      let r = try_agents [] candidates in
+      unwatch_task state ~request_id;
+      r

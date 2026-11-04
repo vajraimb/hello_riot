@@ -410,6 +410,12 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                         in
                         record_decision state decision';
                         Ok (text ^ "\n\n[agent: " ^ nm ^ "]")
+                    | Error err when Option.is_some (cancel_reason_of err) ->
+                        let _ = Portal_signals.update state.signals nm ~fn:Portal_signals.release_in_flight in
+                        let reason = cancel_reason_of err |> Option.unwrap_or ~default:"user" in
+                        record_decision state { decision with Portal_router.attempts = List.rev acc };
+                        emit_task_done ~cancelled:true ~error:(cancel_text reason) state ~request_id ~chosen:None ~attempts:(List.length acc + 1) ~ok:false;
+                        Error (cancel_text reason)
                     | Error err ->
                         let _ =
                           Portal_signals.update state.signals nm ~fn:(fun s ->
@@ -430,8 +436,11 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                 )
             )
         in
-        if String.equal mode "sync" then
-          run_sync [] candidates
+        if String.equal mode "sync" then (
+          watch_task state ~request_id ();
+          let r = run_sync [] candidates in
+          unwatch_task state ~request_id;
+          r)
         else
           (* async: start the first candidate in the background and return a task_id *)
           let nm = List.head candidates |> Option.unwrap_or ~default:"" in
@@ -456,14 +465,19 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                   Portal_signals.update state.signals nm ~fn:Portal_signals.mark_in_flight
                 in
                 let _ =
-                  Runtime.spawn_blocked (fun () ->
+                  spawn (fun () ->
+                    watch_task state ~request_id ();
                     let t0 = Time.Instant.now () in
                     let on_line = observe nm agent in
-                    let result = Portal_agent.collect ~on_line ~agent ~model:model_for ~prompt () in
+                    let result = blocking_agent_call ~on_line ~agent ~model:model_for ~prompt in
+                    unwatch_task state ~request_id;
                     let latency_ms = Time.Duration.to_millis (Time.Instant.elapsed t0) in
                     finished nm ~latency_ms result;
                     (match result with
-                     | Error e -> emit_task_done ~error:e state ~request_id ~chosen:None ~attempts:1 ~ok:false
+                     | Error e ->
+                         let cancelled = Option.is_some (cancel_reason_of e) in
+                         let e = match cancel_reason_of e with Some r -> cancel_text r | None -> e in
+                         emit_task_done ~cancelled ~error:e state ~request_id ~chosen:None ~attempts:1 ~ok:false
                      | Ok _ -> ());
                     (
                       match result with
@@ -498,7 +512,8 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                       | Error err ->
                           let _ =
                             Portal_signals.update state.signals nm ~fn:(fun s ->
-                              Portal_signals.record_failure s ~error:err (Portal_signals.now_ms ()))
+                              if Option.is_some (cancel_reason_of err) then Portal_signals.release_in_flight s
+                              else Portal_signals.record_failure s ~error:err (Portal_signals.now_ms ()))
                           in
                           let attempt =
                             {
