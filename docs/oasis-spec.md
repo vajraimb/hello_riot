@@ -57,7 +57,7 @@ Oasis 要解决的四件事：
 **已兑现**（代码中可验证）：
 
 - **单二进制**：一个 `oasis` 文件跑完整门户（HTTP/WS/MCP/dashboard），约 9.4MB
-- **调度足够快**：`route_scored` 约 33µs，可以每个请求都重新评分，不需要缓存决策
+- **调度足够快**：`route_scored` 约 2µs（0.3 `riot bench`；0.2 记录为 33µs），可以每个请求都重新评分，不需要缓存决策
 - **流式导体模式**：每个流式请求一个导体 actor，上游 I/O 跑在 `spawn_blocked` 阻塞道，
   通过 mailbox + `leg_id` 选择器把"旧 leg 的迟到消息"自然丢弃——这是无缝切换实现简洁的根本原因
 - **跨请求共享状态**用 `ConcurrentHashMap` 承载（signals / task 句柄 / session 粘性），
@@ -96,9 +96,9 @@ Oasis 要解决的四件事：
 └─────────────────────────────────────────────────────┘
 ```
 
-**结构债**：`portal_gateway.ml` 约 3200 行，占 portal 代码 43%，同时承载流式导体、账户执行、
+**结构债**（0.2）：`portal_gateway.ml` 约 3200 行，占 portal 代码 43%，同时承载流式导体、账户执行、
 agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS。它是最难单测的模块。
-拆分计划见 §7。
+**[0.3]** 已按 §7 拆分，`portal_gateway.ml` 剩约 100 行；上图中的"网关"指拆分后的模块集合。
 
 ### 2.2 核心概念
 
@@ -190,6 +190,9 @@ spec 只约束**语义**：
 - 五类事件各有独立节点状态：候选（灰蓝）/ 执行中（青色脉动）/ 成功（绿）/ 失败（红）/ 被拒（灰红）
 - **[0.3 新增]** `handoff` 事件在图上表现为"失败节点 → 新尝试节点"的回环边，并在节点上标注
   `prefix_matched` 字节数与 `diverged` 状态，使 handoff 质量可视
+- **[0.3 新增]** 账户路径（同步与流式）与 agent 路径发出同一组事件：
+  `task_started → routed → (attempt_started → attempt_finished)+ → task_done`，`handoff` 在新 leg 的
+  `attempt_started` 之后、级别判定完成时发出；事件带 `request_id`，过程图只跟随最近一个 `task_started` 的请求（并发请求的事件交织在同一 socket 上）
 
 ### 2.7 配置（oasis.toml）
 
@@ -342,7 +345,8 @@ WS 事件流新增 `handoff` 事件，payload 同上一条。
 
 4. **Riot 0.0.43 运行时限制**（`docs/ai-portal-plan.md` §16.20 有完整证据链）：测试 actor 里 spawn
    挂起、跨 actor 共享普通 map 不可见、`Supervisor.Dynamic.start_child` 挂起——因此
-   agent 执行采用 per-task blocking-lane + 看门狗，OTP 监督树集成留待运行时修复。
+   agent 执行采用 per-task blocking-lane + 看门狗。挂起与段错误的根因已由下述补丁修复，
+   OTP 监督树集成本身仍未做（§9）。
    跨请求共享状态统一走 `ConcurrentHashMap`（§1.4）
 
    **[0.3 新增]** 上面的"spawn 挂起 / start_child 挂起 / 测试中 SIGSEGV"已定位为 Riot 0.0.43
@@ -475,7 +479,7 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 
 ### 8.0 实施状态（0.3 已全部完成）
 
-P0–P3 共 19 项均已实施，`portal_tests` 80 例全绿（串行与并行均可，需先打 §4.2 的 Riot 补丁），`oasis --self-test` 4/4，
+P0–P3 共 19 项均已实施，`portal_tests` 85 例全绿（串行与并行均可，需先打 §4.2 的 Riot 补丁），`oasis --self-test` 4/4，
 `riot bench` 中 `route_scored` ≈ 2µs。实施中对规格做了以下细化，正文已同步：
 
 | 条款 | 细化 / 偏差 | 理由 |
@@ -497,6 +501,12 @@ P0–P3 共 19 项均已实施，`portal_tests` 80 例全绿（串行与并行�
 - 流式导体忽略客户端请求的 `model`，总用账户首个模型；现按 §3.2 模型选择规则
 - 无 token 时 dashboard 的宽松 CORS 允许任意网页调用 agent（见 §5.1 Origin 检查）
 - inbox 收件人名未校验即拼进文件路径（见 §5.3）
+- 账户路径（同步与流式）不发 `routed` 事件，流式导体不发 `attempt_*`/`task_done`，同步成功不发 `task_done`；
+  过程图只在 dashboard 自己发起请求时才初始化——外部客户端的请求（含所有 handoff）从未上图（§2.6）
+- `oasis_task_status` 对未知 task_id 返回 MCP 错误，现按 §6 返回以 `unknown` 开头的正常结果
+
+§8 之外的条款核对：§2.6 handoff 回环边与 §6 task `unknown` 语义按上两条补齐；0.2 的 `oasis.toml` /
+`oasis-demo.toml` 不加修改可启动（验收门槛末条）。
 
 - 测试 S5（粘性会话）硬编码首个请求落在 `acc_a`；S4 断流后路由器按延迟/失败历史选任一账户都合理，
   并行负载下偶发失败。现改为"钉住实际服务的账户 → 令其失败 → 断言改钉另一个且恢复后不回切"
