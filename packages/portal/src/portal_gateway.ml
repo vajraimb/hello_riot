@@ -69,6 +69,7 @@ let start = fun ~config_path ?(config : Portal_config.t option) ~port () ->
       load_decision_history state;
       let _ = Portal_inbox.load state.inbox in
       Portal_signals.load_parked state.signals ~path:(parked_file state);
+      Portal_signals.load_latency state.signals ~path:(data_path state "latency.json");
       if
         String.equal config.Portal_config.policy.Portal_config.goal "cheapest"
         && not (Portal_router.cost_routing_effective config)

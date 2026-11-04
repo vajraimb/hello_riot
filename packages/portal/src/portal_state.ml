@@ -140,6 +140,7 @@ let snapshot_of = fun (state : state) account ->
   let now = Portal_signals.now_ms () in
   {
     Portal_router.latency_ema_ms = s.Portal_signals.latency_ema_ms;
+    latency_samples = s.Portal_signals.latency_samples;
     in_flight = s.Portal_signals.in_flight;
     breaker_open =
       (match s.Portal_signals.breaker with

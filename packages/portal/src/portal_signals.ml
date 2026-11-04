@@ -18,6 +18,7 @@ type signals = {
   requests_in_window: int;
   tokens_in_window: int;
   latency_ema_ms: int;
+  latency_samples: int;
   errors_in_window: int;
   total_requests: int;
   consecutive_failures: int;
@@ -38,7 +39,8 @@ let fresh = fun () ->
     window_start_ms = 0;
     requests_in_window = 0;
     tokens_in_window = 0;
-    latency_ema_ms = 800;
+    latency_ema_ms = 0;
+    latency_samples = 0;
     errors_in_window = 0;
     total_requests = 0;
     consecutive_failures = 0;
@@ -203,6 +205,22 @@ let roll_window = fun (s : signals) now_ms ->
   else
     s
 
+(** The first sample seeds the EMA; later ones move it 25% of the way. *)
+let latency_after = fun (s : signals) ~latency_ms ->
+  if s.latency_samples = 0 then latency_ms
+  else ema_update ~alpha:250 ~previous:s.latency_ema_ms ~sample:latency_ms
+
+(** A finished call that produced nothing usable (an empty answer): its
+    duration still says how slow the account is, without counting as an
+    error against it. *)
+let record_latency = fun (s : signals) ~latency_ms ->
+  {
+    s with
+    latency_ema_ms = latency_after s ~latency_ms;
+    latency_samples = s.latency_samples + 1;
+    in_flight = max 0 (s.in_flight - 1);
+  }
+
 let record_success = fun (s : signals) ~latency_ms ~tokens now_ms ->
   let s = roll_window s now_ms in
   let next_breaker =
@@ -216,7 +234,8 @@ let record_success = fun (s : signals) ~latency_ms ~tokens now_ms ->
     breaker = next_breaker;
     requests_in_window = s.requests_in_window + 1;
     tokens_in_window = s.tokens_in_window + tokens;
-    latency_ema_ms = ema_update ~alpha:250 ~previous:s.latency_ema_ms ~sample:latency_ms;
+    latency_ema_ms = latency_after s ~latency_ms;
+    latency_samples = s.latency_samples + 1;
     total_requests = s.total_requests + 1;
     consecutive_failures = 0;
     in_flight = max 0 (s.in_flight - 1);
@@ -305,6 +324,42 @@ let update = fun (t : t) account ~fn ->
   s'
 
 let snapshot = fun (t : t) account -> get t account
+
+(* ---------- persistence ---------- *)
+
+(** Learned latency survives restarts so routing does not relearn from
+    scratch on every boot. *)
+let save_latency = fun (t : t) ~path ->
+  let entries = ref [] in
+  ConcurrentHashMap.for_each t ~fn:(fun account s ->
+    if s.latency_samples > 0 then
+      entries :=
+        (account, Std.Data.Json.array [ Std.Data.Json.int s.latency_ema_ms; Std.Data.Json.int s.latency_samples ])
+        :: !entries);
+  match Path.from_string path with
+  | Error _ -> ()
+  | Ok p ->
+      let _ = Fs.write (Std.Data.Json.to_string (Std.Data.Json.obj !entries)) p in
+      ()
+
+let load_latency = fun (t : t) ~path ->
+  match Path.from_string path with
+  | Error _ -> ()
+  | Ok p -> (
+      match Fs.read_to_string p with
+      | Error _ -> ()
+      | Ok content -> (
+          match Std.Data.Json.from_string content |> Result.to_option |> Option.and_then ~fn:Std.Data.Json.get_object with
+          | None -> ()
+          | Some fields ->
+              List.for_each fields ~fn:(fun (account, v) ->
+                match Std.Data.Json.get_array v |> Option.map ~fn:(List.filter_map ~fn:Std.Data.Json.get_int) with
+                | Some [ ema; n ] when n > 0 ->
+                    let _ = update t account ~fn:(fun s -> { s with latency_ema_ms = ema; latency_samples = n }) in
+                    ()
+                | _ -> ())
+        )
+    )
 
 (* ---------- parked-account persistence ---------- *)
 

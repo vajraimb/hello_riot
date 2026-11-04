@@ -49,6 +49,7 @@ type decision = {
   rejected: rejected list;
   attempts: attempt list;
   scores: (string * int) list;
+  parts: (string * Json.t) list;
   unpriced: string list;
   handoffs: handoff list;
 }
@@ -69,6 +70,7 @@ let goal_of_string = function
 
 type account_snapshot = {
   latency_ema_ms: int;
+  latency_samples: int;
   in_flight: int;
   breaker_open: bool;
   requests_in_window: int;
@@ -88,6 +90,7 @@ let empty_decision = fun category ->
     rejected = [];
     attempts = [];
     scores = [];
+    parts = [];
     unpriced = [];
     handoffs = [];
   }
@@ -168,6 +171,7 @@ let decision_json = fun (d : decision) ->
                   ("account", Json.string name);
                   ("score", Json.int score);
                   ("price_known", Json.bool (not (List.any d.unpriced ~fn:(String.equal name))));
+                  ("parts", List.find d.parts ~fn:(fun (n, _) -> String.equal n name) |> Option.map ~fn:(fun (_, p) -> p) |> Option.unwrap_or ~default:Json.null);
                 ]))
       );
       ("handoffs", Json.array (List.map d.handoffs ~fn:handoff_json));
@@ -270,6 +274,7 @@ let route = fun (config : Portal_config.t) (lookups : lookups) (task : task) ->
     rejected = List.rev !rejects;
     attempts = [];
     scores = [];
+    parts = [];
     unpriced = [];
     handoffs = [];
   }
@@ -292,12 +297,15 @@ type weights = {
 let weights_of_goal = function
   | Cheapest -> { w_fit = 20; w_cost = 70; w_lat = 5; w_load = 5 }
   | Fastest -> { w_fit = 10; w_cost = 10; w_lat = 70; w_load = 10 }
-  | Best -> { w_fit = 70; w_cost = 10; w_lat = 10; w_load = 10 }
+  | Best -> { w_fit = 60; w_cost = 10; w_lat = 20; w_load = 10 }
   | Balanced -> { w_fit = 35; w_cost = 25; w_lat = 20; w_load = 20 }
 
-let latency_score = fun ~ema_ms ->
-  (* ema 0 → 100; every 20ms of EMA costs 1 point, floor 0 *)
-  max 0 (100 - (ema_ms / 20))
+(** Speed relative to the fastest measured candidate: as fast → 100, twice as
+    slow → 50, ten times → 10. Unmeasured candidates are neutral (50) so
+    neither fresh nor known-slow accounts are favoured by default. *)
+let latency_score = fun ~fastest_ms ~ema_ms ~samples ->
+  if samples <= 0 then 50
+  else (100 * max 1 fastest_ms) / max 1 ema_ms
 
 (** Agents run for tens of seconds to minutes: every 2s of EMA costs 1 point,
     so 30s and 120s agents still score differently. *)
@@ -333,8 +341,8 @@ let route_scored =
           ~fn:(fun a -> a.Portal_config.name)
   in
   let rejects = ref [] in
-  (* returns (name, model, price_nano (None = unknown), fit, lat_score, load_score) *)
-  let check (name : string) : (string * string * int option * int * int * int) option =
+  (* returns (name, model, price_nano (None = unknown), fit, (latency ema, samples), load_score) *)
+  let check (name : string) : (string * string * int option * int * (int * int) * int) option =
     match Portal_config.find_account config name with
     | None ->
         rejects := { account = name; reason = "unknown_account" } :: !rejects;
@@ -421,7 +429,7 @@ let route_scored =
                       model,
                       price_nano,
                       fit,
-                      latency_score ~ema_ms:snap.latency_ema_ms,
+                      (snap.latency_ema_ms, snap.latency_samples),
                       load_score ~in_flight:snap.in_flight )
                 else (
                   let reason =
@@ -457,12 +465,31 @@ let route_scored =
         if max_price = min_price then 100
         else 100 - (((p - min_price) * 100) / (max_price - min_price))
   in
+  let fastest_ms =
+    List.filter_map passing ~fn:(fun (_, _, _, _, (ema, n), _) -> if n > 0 then Some ema else None)
+    |> List.fold_left ~init:0 ~fn:(fun acc e -> if acc = 0 then e else min acc e)
+  in
   let weights = weights_of_goal goal in
+  let parts =
+    List.map passing ~fn:(fun (name, _, price, fit, (ema, n), load) ->
+      ( name,
+        Json.obj
+          [
+            ("fit", Json.int fit);
+            ("cost", Json.int (cost_score price));
+            ("speed", Json.int (latency_score ~fastest_ms ~ema_ms:ema ~samples:n));
+            ("load", Json.int load);
+            ("latency_ema_ms", Json.int (if n > 0 then ema else 0));
+            ("samples", Json.int n);
+            ("weights", Json.array [ Json.int weights.w_fit; Json.int weights.w_cost; Json.int weights.w_lat; Json.int weights.w_load ]);
+          ] ))
+  in
   let indexed =
     List.map
       (List.enumerate passing)
-      ~fn:(fun (idx, (name, model, price, fit, lat, load)) ->
+      ~fn:(fun (idx, (name, model, price, fit, (ema, n), load)) ->
         let c_score = cost_score price in
+        let lat = latency_score ~fastest_ms ~ema_ms:ema ~samples:n in
         let total =
           ((weights.w_fit * fit)
           + (weights.w_cost * c_score)
@@ -500,6 +527,7 @@ let route_scored =
     rejected = List.rev !rejects;
     attempts = [];
     scores = List.map sorted ~fn:(fun (_, name, _, s) -> (name, s));
+    parts;
     unpriced =
       List.filter_map passing ~fn:(fun (name, _, p, _, _, _) ->
         match p with None -> Some name | Some _ -> None);

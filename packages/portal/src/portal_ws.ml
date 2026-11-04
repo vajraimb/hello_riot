@@ -23,6 +23,8 @@ let broadcast_json = fun (state : state) (payload : Json.t) ->
 
 let broadcast_event = fun (state : state) ~(type_ : string) ~(request_id : string) ~(data : Json.t) ->
   Portal_feed.apply state.feed ~type_ ~request_id data;
+  if String.equal type_ "task_done" then
+    Portal_signals.save_latency state.signals ~path:(data_path state "latency.json");
   broadcast_json
     state
     (Json.obj
@@ -47,7 +49,12 @@ let emit_routed = fun (state : state) ~(request_id : string) ~(mode : string) (d
             "candidates",
             Json.array
               (List.map d.Portal_router.scores ~fn:(fun (nm, sc) ->
-                Json.obj [ ("name", Json.string nm); ("score", Json.int sc) ]))
+                let parts =
+                  List.find d.Portal_router.parts ~fn:(fun (n, _) -> String.equal n nm)
+                  |> Option.map ~fn:(fun (_, p) -> [ ("parts", p) ])
+                  |> Option.unwrap_or ~default:[]
+                in
+                Json.obj ([ ("name", Json.string nm); ("score", Json.int sc) ] @ parts)))
           );
           (
             "rejected",

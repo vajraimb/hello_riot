@@ -358,7 +358,7 @@ async function run() {
   setTimeout(() => { $('run').disabled = false; }, 600);
   promptEl.value = ''; promptEl.style.height = 'auto';
   try {
-    const res = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: null, messages: [{ role: 'user', content: text }], max_tokens: 16384, stream: true }) });
+    const res = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: null, messages: [{ role: 'user', content: text }], stream: true }) });
     if (!res.ok || !res.body) {
       let msg = 'HTTP ' + res.status;
       try { const j = await res.json(); msg += ' ' + (j.error || JSON.stringify(j)); } catch (e) {}
@@ -441,14 +441,19 @@ async function loadDetail(scrollEnd) {
     renderDetail(scrollEnd);
   } catch (e) {}
 }
+function partsText(p) {
+  if (!p) return '';
+  const lat = p.samples ? '均 ' + fmtDur(p.latency_ema_ms) + ' / ' + p.samples + ' 次' : '无耗时记录';
+  return '适配 ' + p.fit + ' · 速度 ' + p.speed + ' · 成本 ' + p.cost + ' · 负载 ' + p.load + ' · ' + lat;
+}
 function scoreTable(route) {
   const cands = (route && route.candidates) || [];
   const rej = (route && route.rejected) || [];
   if (!cands.length && !rej.length) return '';
   const max = Math.max(1, ...cands.map(c => c.score || 0));
   const rows = cands.map(c => '<tr><td class="mono">' + esc(c.name) + (c.name === route.chosen ? ' <span class="pill ok">选中</span>' : '') +
-    '</td><td><div class="bar"><i style="width:' + Math.round(100 * (c.score || 0) / max) + '%"></i></div></td><td class="num">' + c.score + '</td></tr>').join('') +
-    rej.map(r => '<tr><td class="mono dim">' + esc(r.name) + '</td><td colspan="2" class="dim">' + esc(REASON[r.reason] || r.reason) + '</td></tr>').join('');
+    '</td><td><div class="bar"><i style="width:' + Math.round(100 * (c.score || 0) / max) + '%"></i></div></td><td class="num">' + c.score + '</td><td class="dim">' + partsText(c.parts) + '</td></tr>').join('') +
+    rej.map(r => '<tr><td class="mono dim">' + esc(r.name) + '</td><td colspan="3" class="dim">' + esc(REASON[r.reason] || r.reason) + '</td></tr>').join('');
   return '<details><summary>候选与评分（' + cands.length + ' 个候选，' + rej.length + ' 个排除）</summary><table class="ctable">' + rows + '</table></details>';
 }
 const REASON = { unknown_account: '未在配置中', disabled: '已停用', model_not_served: '不提供所需模型', context_too_small: '上下文不够', budget_exhausted: '预算用完', daily_limit_reached: '今日次数用完', quota_parked: '额度暂停中', circuit_open: '熔断中', rpm_exhausted: '每分钟限额满', concurrency_limit: '并发已满' };

@@ -76,6 +76,7 @@ let bench_lookups =
       (fun name ->
         {
           Router.latency_ema_ms = 300;
+          latency_samples = 1;
           in_flight = 0;
           breaker_open = false;
           requests_in_window = 0;

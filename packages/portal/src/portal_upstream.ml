@@ -396,14 +396,13 @@ let requires_openai_protocol = fun (body : Json.t) ->
   let has k = Option.is_some (Json.get_field k body) in
   has "tools" || has "tool_choice" || has "functions" || has "function_call" || has "response_format"
 
-let upstream_body = fun ?(stream_usage = false) ?(extra = []) ~model ~messages ~max_tokens ~stream () ->
+(** [max_tokens] is the client's own limit, forwarded only when given:
+    output budgets are the caller's business, not the router's. *)
+let upstream_body = fun ?(stream_usage = false) ?(extra = []) ~model ~messages ~(max_tokens : int option) ~stream () ->
   Json.obj
-    ([
-       ("model", Json.string model);
-       ("messages", messages);
-       ("max_tokens", Json.int max_tokens);
-       ("stream", Json.bool stream);
-     ]
+    ([ ("model", Json.string model); ("messages", messages) ]
+    @ (match max_tokens with Some n -> [ ("max_tokens", Json.int n) ] | None -> [])
+    @ [ ("stream", Json.bool stream) ]
     @ extra
     @
     if stream && stream_usage then
@@ -411,6 +410,16 @@ let upstream_body = fun ?(stream_usage = false) ?(extra = []) ~model ~messages ~
     else
       [])
   |> Json.to_string
+
+(** Anthropic requires max_tokens: without a client limit use the model's
+    full output budget from the KB. *)
+let anthropic_max_tokens = fun (config : Portal_config.t) ~model (max_tokens : int option) ->
+  match max_tokens with
+  | Some n -> n
+  | None -> (
+      match Portal_kb.find config.Portal_config.kb model with
+      | Some kbe when kbe.Portal_kb.max_output > 0 -> kbe.Portal_kb.max_output
+      | _ -> 32000)
 
 (** Model for a leg: the one the client asked for when this account serves it,
     otherwise the account's primary model. *)

@@ -22,7 +22,7 @@ type chat_sync_result = {
   cst_decision: Portal_router.decision;
 }
 
-let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decision : Portal_router.decision) ~(candidates : string list) ~(model : string option) ~(messages : Json.t) ~(max_tokens : int) ?(extra = []) ~(session : string option) ~(request_id : string) () ->
+let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decision : Portal_router.decision) ~(candidates : string list) ~(model : string option) ~(messages : Json.t) ~(max_tokens : int option) ?(extra = []) ~(session : string option) ~(request_id : string) () ->
     let rec try_attempts acc = function
       | [] ->
           let decision' =
@@ -85,7 +85,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                     ~model:upstream_model
                     ~messages:
                       (messages)
-                    ~max_tokens
+                    ~max_tokens:(anthropic_max_tokens config ~model:upstream_model max_tokens)
                     ~stream:false
                 else
                   upstream_body ~extra ~model:upstream_model ~messages ~max_tokens ~stream:false ()
@@ -136,6 +136,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                       rest
                 | Ok (200, resp_body, latency_ms) when (not anthropic) && Option.is_some (empty_answer_of resp_body) ->
                     let err = empty_answer_of resp_body |> Option.unwrap_or ~default:"empty_answer" in
+                    let _ = Portal_signals.update state.signals name ~fn:(Portal_signals.record_latency ~latency_ms) in
                     emit_attempt_finished state ~request_id ~account:name ~status:(Some 200) ~latency_ms ~error:(Some err);
                     try_attempts
                       ({
@@ -265,10 +266,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
   let model =
     Json.get_field "model" body |> Option.and_then ~fn:Json.get_string
   in
-  let max_tokens =
-    Json.get_field "max_tokens" body |> Option.and_then ~fn:Json.get_int
-    |> Option.unwrap_or ~default:1024
-  in
+  let max_tokens = Json.get_field "max_tokens" body |> Option.and_then ~fn:Json.get_int in
   let est_in = est_input_tokens body in
   let explicit_category =
     match get_header ctx "x-oasis-category" |> Option.map ~fn:String.trim with
@@ -323,7 +321,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
       Portal_router.category;
       model;
       est_in_tokens = est_in;
-      est_out_tokens = max_tokens;
+      est_out_tokens = max_tokens |> Option.unwrap_or ~default:1024;
     }
   in
   let mode =

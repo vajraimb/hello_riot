@@ -871,9 +871,10 @@ let test_signals_window_and_breaker = fun _ctx ->
 
 (* ---------- M2: scored routing ---------- *)
 
-let mk_snap = fun ?(ema = 200) ?(inflight = 0) ?(breaker_open = false) ?(rpm_used = 0) () ->
+let mk_snap = fun ?(ema = 200) ?(samples = 1) ?(inflight = 0) ?(breaker_open = false) ?(rpm_used = 0) () ->
   {
     Router.latency_ema_ms = ema;
+    latency_samples = samples;
     in_flight = inflight;
     breaker_open;
     requests_in_window = rpm_used;
@@ -3083,7 +3084,48 @@ let test_router_agent_latency_scale = fun _ctx ->
   Test.assert_equal ~expected:85 ~actual:(Router.latency_score_agent ~ema_ms:30_000);
   Test.assert_equal ~expected:40 ~actual:(Router.latency_score_agent ~ema_ms:120_000);
   Test.assert_equal ~expected:0 ~actual:(Router.latency_score_agent ~ema_ms:600_000);
-  Test.assert_equal ~expected:0 ~actual:(Router.latency_score ~ema_ms:30_000);
+  Ok ()
+
+let test_router_relative_latency = fun _ctx ->
+  Test.assert_equal ~expected:100 ~actual:(Router.latency_score ~fastest_ms:5_000 ~ema_ms:5_000 ~samples:3);
+  Test.assert_equal ~expected:50 ~actual:(Router.latency_score ~fastest_ms:5_000 ~ema_ms:10_000 ~samples:3);
+  Test.assert_equal ~expected:2 ~actual:(Router.latency_score ~fastest_ms:5_000 ~ema_ms:210_000 ~samples:3);
+  Test.assert_equal ~expected:50 ~actual:(Router.latency_score ~fastest_ms:5_000 ~ema_ms:0 ~samples:0);
+  Ok ()
+
+let test_router_best_avoids_very_slow = fun _ctx ->
+  let kb =
+    [
+      mk_kb_model ~tier:5 ~strengths:[ "coding" ] "m-deep";
+      mk_kb_model ~tier:4 ~strengths:[ "coding" ] "m-quick";
+    ]
+  in
+  let config =
+    mk_config
+      ~accounts:[ mk_account ~models:[ "m-deep" ] "acc_deep"; mk_account ~models:[ "m-quick" ] "acc_quick" ]
+      ~kb ~routes:[] ~max_fallback:1
+  in
+  let snap ema = fun _ -> mk_snap ~ema () in
+  let lookups f = mk_scored_lookups ~spent:(fun _ -> 0) ~day:(fun _ -> 0) ~snap:f in
+  let task = { Router.category = "coding"; model = None; est_in_tokens = 100; est_out_tokens = 100 } in
+  (* equally fast: the stronger model wins *)
+  let d = Router.route_scored config (lookups (snap 5_000)) ~goal:Router.Best task in
+  Test.assert_equal ~expected:(Some "acc_deep") ~actual:d.Router.chosen;
+  (* 3.5 minutes against 8 seconds: quality no longer outweighs the wait *)
+  let slow name = if String.equal name "acc_deep" then mk_snap ~ema:210_000 () else mk_snap ~ema:8_000 () in
+  let d2 = Router.route_scored config (lookups slow) ~goal:Router.Best task in
+  Test.assert_equal ~expected:(Some "acc_quick") ~actual:d2.Router.chosen;
+  Test.assert_equal ~expected:2 ~actual:(List.length d2.Router.parts);
+  Ok ()
+
+let test_upstream_body_max_tokens_passthrough = fun _ctx ->
+  let messages = Json.array [] in
+  let has_max b = String.contains b "max_tokens" in
+  Test.assert_equal ~expected:false ~actual:(has_max (Portal.Upstream.upstream_body ~model:"m" ~messages ~max_tokens:None ~stream:false ()));
+  Test.assert_equal ~expected:true ~actual:(has_max (Portal.Upstream.upstream_body ~model:"m" ~messages ~max_tokens:(Some 99) ~stream:false ()));
+  let s1 = Signals.record_latency (Signals.fresh ()) ~latency_ms:4_000 in
+  Test.assert_equal ~expected:4_000 ~actual:s1.Signals.latency_ema_ms;
+  Test.assert_equal ~expected:1 ~actual:s1.Signals.latency_samples;
   Ok ()
 
 let test_signals_classify_error = fun _ctx ->
@@ -3599,6 +3641,9 @@ let tests =
     case "steps: clip keeps utf-8 valid" test_steps_clip_utf8;
     case ~size:Test.Large "agent: exit reaps helpers that keep stdout open" test_agent_exit_reaps_lingering_helpers;
     case "classify: prompt content to category" test_classify_prompts;
+    case "router: latency scored relative to the fastest" test_router_relative_latency;
+    case "router: best goal avoids a very slow account" test_router_best_avoids_very_slow;
+    case "upstream: max_tokens only when the client sets it" test_upstream_body_max_tokens_passthrough;
     case "feed: explains inferred category" test_feed_explains_inferred_category;
     case "stream: reasoning-only answer fails over" test_stream_reasoning_only_fails_over;
     case "non-stream: empty answer fails over" test_nonstream_empty_answer_fails_over;

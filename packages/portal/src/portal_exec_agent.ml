@@ -78,7 +78,10 @@ let route_agents = fun (state : state) (config : Portal_config.t) (category : st
         None
       ) else
         let fit = Portal_agent.fit a ~category in
-        let lat = Portal_router.latency_score_agent ~ema_ms:s.Portal_signals.latency_ema_ms in
+        let lat =
+          if s.Portal_signals.latency_samples = 0 then 50
+          else Portal_router.latency_score_agent ~ema_ms:s.Portal_signals.latency_ema_ms
+        in
         Some (a, fit + lat)
     )
   in
@@ -101,6 +104,7 @@ let route_agents = fun (state : state) (config : Portal_config.t) (category : st
     rejected = List.rev !rejects;
     attempts = [];
     scores = List.map sorted ~fn:(fun (a, sc) -> (a.Portal_agent.name, sc));
+    parts = [];
     unpriced = [];
     handoffs = [];
   }

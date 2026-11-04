@@ -21,7 +21,7 @@ type conductor_ctx = {
   task: Portal_router.task;
   decision: Portal_router.decision;
   messages: Json.t;
-  max_tokens: int;
+  max_tokens: int option;
   session: string option;
   request_id: string;
   handoff_allowed: bool;
@@ -354,7 +354,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
                     ~thinking:(if prefill then "disabled" else account.Portal_config.thinking)
                     ~model:cs.current_model
                     ~messages:messages_up
-                    ~max_tokens:cc.max_tokens
+                    ~max_tokens:(anthropic_max_tokens cc.config ~model:cs.current_model cc.max_tokens)
                     ~stream:true
                 else
                   upstream_body
@@ -522,11 +522,13 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       let latency_ms =
         Time.Duration.to_millis (Time.Instant.elapsed cs.leg_start)
       in
-      if penalize then (
-        let _ =
-          apply_failure cc.c_state cc.config ~account:cs.current_account ~status ~body ~err
-        in
-        ()
+      (
+        if penalize then
+          let _ = apply_failure cc.c_state cc.config ~account:cs.current_account ~status ~body ~err in
+          ()
+        else
+          let _ = Portal_signals.update cc.c_state.signals cs.current_account ~fn:(Portal_signals.record_latency ~latency_ms) in
+          ()
       );
       Portal_ledger.record
         cc.c_state.ledger

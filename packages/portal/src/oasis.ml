@@ -268,7 +268,6 @@ let cmd_ask = fun ~server ~prompt ~category ~goal ~stream ->
           Json.array
             [ Json.obj [ ("role", Json.string "user"); ("content", Json.string prompt) ] ]
         );
-        ("max_tokens", Json.int 2048);
         ("stream", Json.bool stream);
       ]
     |> Json.to_string

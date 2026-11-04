@@ -118,9 +118,9 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
        模型服务 / 熔断未开 / 未停牌 / 并发未满 / 月预算未超 / 日限额未达 / rpm 未达 / 上下文放得下
 分数 = ( w_fit  × fit(tier × strengths/weaknesses, 0..100)
        + w_cost × cost_score(候选内相对归一化, 0..100)
-       + w_lat  × latency_score(100 - EMA/20, 底 0)
+       + w_lat  × latency_score(候选内相对：100 × 最快者EMA / 本账户EMA；无样本 = 50)
        + w_load × load_score(100 - in_flight×15, 底 0) ) / 100
-权重 = 按 goal：best 70/10/10/10 · balanced 35/25/20/20 · cheapest 20/70/5/5 · fastest 10/10/70/10
+权重 = 按 goal：best 60/10/20/10 · balanced 35/25/20/20 · cheapest 20/70/5/5 · fastest 10/10/70/10
 选择 = 分数最高者（同分按配置顺序）；其余按分数排序为回退链，截断到 policy.max_fallback
 ```
 
@@ -148,6 +148,15 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 
 #### 2.3.2 时延分的量纲问题
 
+**[已修正]** 账户池时延分改为候选内相对分：`100 × 最快者 EMA / 本账户 EMA`（同速 100、慢一倍 50、
+慢十倍 10）；EMA 为端到端耗时（流式按整段 leg），首个样本直接作为初值，**无样本时记中性 50**
+（原先默认 800ms 让没用过的账户白拿 60 分、用过的全归零）。"空回答"的耗时也计入 EMA（不计错误）。
+EMA 与样本数持久化到 `.oasis-data/latency.json`（每个 `task_done` 写一次，启动加载）。
+`best` 权重由 70/10/10/10 调为 60/10/20/10：同速时强模型胜，慢几十倍时让位。
+每个候选的四项分量（fit/cost/speed/load、EMA、样本数、权重）随 `routed` 事件的 `candidates[].parts`
+与 decision 的 `scores[].parts` 下发，控制台路由说明写出算式。已知局限：只学"快慢"，不学"答得好不好"；
+没有探索机制，从未被选中的账户一直是中性分。以下为历史记录：
+
 `latency_score = 100 - EMA/20`：EMA ≥ 2000ms 即归零。API 账户首字节通常 200–1500ms，有区分度；
 本地 agent 任务动辄 30–300s，**所有 agent 在 fastest 下时延分恒为 0**，fastest 对 agent 池无意义。
 **[0.3 新增]**：agent 池使用 `latency_score_agent = 100 - EMA/2000`（每 2s 扣 1 分），
@@ -163,7 +172,8 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
   `reasoning_content` 上，`finish_reason: length`），流式与非流式都按失败处理并换下一个候选
   （`empty_answer_reasoning_exhausted` / `empty_answer`）；这类失败**不计入账户健康度**（不触发熔断）。
   推理模型的 `reasoning_content`（OpenRouter 为 `reasoning`）不进回答，按 ~240 字一批作为 `agent_step`
-  的 `thinking` 步骤推到控制台时间线。控制台请求 `max_tokens` 为 16384，给推理留足预算
+  的 `thinking` 步骤推到控制台时间线。`max_tokens` 只转发客户端给的值，Oasis 自己不设上限（控制台、CLI、MCP 都不再默认填）；
+  Anthropic 协议必须带该字段，客户端没给时用 KB 中该模型的 `max_output`
 - **流式（agent）**：子进程 stdout 逐行 → `Portal_steps.parse` 把 claude / cursor-agent / gemini / kimi / grok
   的 JSON 事件流解析成工作步骤（`thinking` / `text` / `tool` / `tool_result` / `usage`），非 JSON 行与未知 CLI
   按纯文本处理。只有 `text` 进入客户端 delta（末尾 `result` 是全文重复，丢弃；整条消息之间、工具调用后续写的

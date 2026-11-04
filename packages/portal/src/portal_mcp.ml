@@ -117,7 +117,7 @@ let tools_list = fun () ->
                     ("category", str_prop ~required:false ~description:"Task category: general, coding, writing, analysis, long_doc.");
                     ("goal", str_prop ~required:false ~description:"Routing goal: best, balanced, cheapest, fastest.");
                     ("model", str_prop ~required:false ~description:"Force a specific model (optional).");
-                    ("max_tokens", int_prop ~description:"Max output tokens (default 2048).");
+                    ("max_tokens", int_prop ~description:"Max output tokens; omit to use the model's own default.");
                   ]
               );
               ("required", Json.array [ Json.string "prompt" ]);

@@ -158,6 +158,31 @@ let handoff_text = fun ~from_ ~to_ ~level ~reason ->
 
 let names_of = fun items -> List.filter_map items ~fn:(fun c -> str c "name")
 
+let duration_text = fun ms ->
+  if ms < 1000 then Int.to_string ms ^ "ms"
+  else if ms < 60_000 then Int.to_string (ms / 1000) ^ "." ^ Int.to_string (ms mod 1000 / 100) ^ "s"
+  else Int.to_string (ms / 60_000) ^ "m" ^ Int.to_string (ms mod 60_000 / 1000) ^ "s"
+
+(** "91 = 适配 100×60% + 速度 50×20% + …；历史平均耗时 3m30s（4 次）" *)
+let parts_text = fun ~score (parts : Json.t) ->
+  let g k = int_field parts k |> Option.unwrap_or ~default:0 in
+  let w =
+    Json.get_field "weights" parts |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
+    |> List.filter_map ~fn:Json.get_int
+  in
+  match w with
+  | [ wf; wc; wl; wd ] ->
+      let term label v wt = label ^ " " ^ Int.to_string v ^ "×" ^ Int.to_string wt ^ "%" in
+      let n = g "samples" in
+      let lat =
+        if n = 0 then "还没有耗时记录，速度按中性 50 分计"
+        else "历史平均耗时 " ^ duration_text (g "latency_ema_ms") ^ "（" ^ Int.to_string n ^ " 次）"
+      in
+      Int.to_string score ^ " = "
+      ^ String.concat " + " [ term "适配" (g "fit") wf; term "速度" (g "speed") wl; term "成本" (g "cost") wc; term "负载" (g "load") wd ]
+      ^ "；" ^ lat
+  | _ -> Int.to_string score
+
 let route_summary_of = fun ~goal ~category (data : Json.t) ->
   let mode = str data "mode" |> Option.unwrap_or ~default:"chat" in
   let chosen = str data "chosen" in
@@ -201,7 +226,16 @@ let route_summary_of = fun ~goal ~category (data : Json.t) ->
           category_text category ^ "任务里这个 agent 的适配分最高"
         else "按「" ^ goal_text goal ^ "」目标综合评分最高"
       in
-      let score = match score_of c with Some s -> "（" ^ Int.to_string s ^ "）" | None -> "" in
+      let parts =
+        List.find candidates ~fn:(fun x -> String.equal (str x "name" |> Option.unwrap_or ~default:"") c)
+        |> Option.and_then ~fn:(fun x -> Json.get_field "parts" x)
+      in
+      let score =
+        match (score_of c, parts) with
+        | (Some s, Some p) -> "（" ^ parts_text ~score:s p ^ "）"
+        | (Some s, None) -> "（" ^ Int.to_string s ^ "）"
+        | _ -> ""
+      in
       (if String.equal mode "agent" then "交给 agent " else "选用账户 ") ^ c ^ "：" ^ why ^ score ^ "；" ^ backup_txt ^ reject_txt
 
 (** Why the category is what it is, when Oasis inferred it. *)

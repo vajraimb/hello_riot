@@ -178,11 +178,9 @@ let mcp_tool_ask = fun (state : state) (params : Json.t) ->
         |> Option.unwrap_or ~default:config.Portal_config.policy.Portal_config.goal
       in
       let model = mcp_get_str params "model" in
-      let max_tokens =
-        mcp_get_int params "max_tokens" |> Option.unwrap_or ~default:2048
-      in
+      let max_tokens = mcp_get_int params "max_tokens" in
       let task =
-        { Portal_router.model; category; est_in_tokens = 0; est_out_tokens = max_tokens }
+        { Portal_router.model; category; est_in_tokens = 0; est_out_tokens = max_tokens |> Option.unwrap_or ~default:1024 }
       in
       let decision =
         Portal_router.route_scored
