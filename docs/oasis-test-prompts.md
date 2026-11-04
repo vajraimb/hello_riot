@@ -4,6 +4,7 @@
 
 ```bash
 _build/debug/x86_64-unknown-linux-gnu/out/portal/oasis --config oasis.toml
+# macOS (Apple Silicon): _build/debug/aarch64-apple-darwin/out/portal/oasis --config oasis.toml
 ```
 
 ## 一、路由与流式（直接调 API）
@@ -12,7 +13,7 @@ _build/debug/x86_64-unknown-linux-gnu/out/portal/oasis --config oasis.toml
 
 ```bash
 curl -N http://127.0.0.1:9899/v1/chat/completions \
-  -H 'Content-Type: application/json' -H 'X-Oasis-Category: general' -H 'X-Oasis-Goal: fast' \
+  -H 'Content-Type: application/json' -H 'X-Oasis-Category: general' -H 'X-Oasis-Goal: fastest' \
   -d '{"stream":true,"messages":[{"role":"user","content":"用三句话解释什么是无缝切换"}]}'
 ```
 
@@ -20,7 +21,7 @@ curl -N http://127.0.0.1:9899/v1/chat/completions \
 
 - 过程图依次出现任务节点、候选账户、执行节点，最后变绿。
 - 决策日志能看到各账户的 scores。
-- 把 Goal 换成 `cheapest` 或 `quality` 再跑一次，被选中的账户应该会变。
+- 把 Goal 换成 `cheapest` 或 `best` 再跑一次，被选中的账户应该会变（只认 `cheapest`/`fastest`/`best`/`balanced`，其他值静默按 `balanced` 处理）。
 
 **2. 长输出，增加碰到 handoff 的机会**
 
@@ -115,7 +116,7 @@ curl http://127.0.0.1:9899/v1/chat/completions -H 'Content-Type: application/jso
 
 ```bash
 riot build -p portal --tests
-T=_build/debug/x86_64-unknown-linux-gnu/out/portal/portal_tests
+T=_build/debug/x86_64-unknown-linux-gnu/out/portal/portal_tests   # macOS: aarch64-apple-darwin
 $T run-tests "H"
 $T run-tests "ws:"
 ```
