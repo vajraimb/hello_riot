@@ -1851,7 +1851,17 @@ let test_gateway_agent_async_task = fun _ctx ->
                       )
                   )
               in
-              poll 0
+              (
+                match
+                  mcp_post
+                    "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"oasis_task_status\",\"arguments\":{\"task_id\":\"task-from-before-restart\"}}}"
+                with
+                | Error e -> Error ("stale poll: " ^ e)
+                | Ok (_, b3) ->
+                    Test.assert_equal ~expected:true ~actual:(String.contains b3 "\"text\":\"unknown: no task task-from-before-restart");
+                    Test.assert_equal ~expected:false ~actual:(String.contains b3 "\"isError\":true");
+                    poll 0
+              )
         )
       )
   )

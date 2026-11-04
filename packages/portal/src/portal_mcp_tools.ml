@@ -460,7 +460,10 @@ let mcp_tool_task_status = fun (state : state) (params : Json.t) ->
   | None -> Error "missing required parameter: task_id"
   | Some task_id -> (
       match Portal_task.get state.tasks ~task_id with
-      | None -> Error ("unknown task_id: " ^ task_id)
+      | None ->
+          Ok
+            ("unknown: no task " ^ task_id
+            ^ " on this gateway (task handles are in-memory and do not survive a restart); resubmit if you still need the result")
       | Some (Portal_task.Running) ->
           Ok ("running (agent still working); poll again in a few seconds")
       | Some (Portal_task.Done text) -> Ok text
