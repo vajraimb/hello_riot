@@ -115,6 +115,42 @@ out_price_nano = 0
 cache_hit_price_nano = 0
 
 [[models]]
+name = "glm-5.3-flash:cloud"
+tier = 4
+strengths = ["general", "coding"]
+weaknesses = []
+context_window = 1048576
+max_output = 32768
+latency = "fast"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "glm-5.2:cloud"
+tier = 4
+strengths = ["general", "writing", "analysis"]
+weaknesses = []
+context_window = 1048576
+max_output = 32768
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "nemotron-3-super:cloud"
+tier = 3
+strengths = ["general", "analysis"]
+weaknesses = []
+context_window = 262144
+max_output = 16384
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
 name = "qwen3.7-plus"
 tier = 5
 strengths = ["coding", "general", "analysis"]
@@ -192,7 +228,7 @@ tpm = 200000
 daily_limit = 200
 monthly_budget_nano = 5000000000
 
-# Ollama 本地模型：离线兜底。:cloud 模型需要 ollama 进程能解析 ollama.com，本机 DNS 超时，未接入。
+# Ollama 本地模型：离线兜底。
 # Ollama 默认上下文 4096（OLLAMA_CONTEXT_LENGTH 可调），KB 必须如实填，否则长任务会被路由来截断
 [[accounts]]
 name = "ollama_local"
@@ -201,6 +237,19 @@ base_url = "http://127.0.0.1:11434/v1"
 models = ["qwen3:8b"]
 enabled = true
 rpm = 0
+tpm = 0
+daily_limit = 0
+monthly_budget_nano = 0
+
+# Ollama cloud：经本机 ollama 进程转发到 ollama.com（/etc/hosts 写死了 ollama.com 的 IP）。
+# kimi-k2.5 / qwen3.5 / minimax-m2.5 的 :cloud 版已被官方下线
+[[accounts]]
+name = "ollama_cloud"
+provider = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+models = ["glm-5.3-flash:cloud", "glm-5.2:cloud", "nemotron-3-super:cloud"]
+enabled = true
+rpm = 30
 tpm = 0
 daily_limit = 0
 monthly_budget_nano = 0
@@ -316,8 +365,8 @@ latency = "slow"
 enabled = true
 concurrency_limit = 2
 
-# Grok CLI：本机 DNS 污染了 api.x.ai / grok.com（CLI 报 prompt_ack_timeout），
-# Oasis 的 connect_ip 管不到子进程；系统 DNS 修好后再改 enabled = true
+# Grok CLI：本机 DNS 污染了 auth.x.ai / cli-chat-proxy.grok.com 等（CLI 报 prompt_ack_timeout），
+# Oasis 的 connect_ip 管不到子进程；这些域名在 /etc/hosts 写死后再改 enabled = true
 [[agents]]
 name = "grok_cli"
 command = "grok"
@@ -338,7 +387,7 @@ concurrency_limit = 2
 
 [[routes]]
 category = "general"
-accounts = ["kimi_work", "deepseek_pro", "glm_zai", "openrouter", "perplexity", "dashscope_coding", "ollama_local"]
+accounts = ["kimi_work", "deepseek_pro", "glm_zai", "openrouter", "perplexity", "dashscope_coding", "ollama_cloud", "ollama_local"]
 
 # 联网检索只有 Perplexity 能做；混入其他账户时会按时延分被抢走
 [[routes]]
