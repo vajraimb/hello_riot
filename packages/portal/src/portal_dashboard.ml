@@ -213,7 +213,8 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
         <button data-v="chat" title="走 API 账户直接回答">问答</button>
         <button data-v="agent" title="交给本机 agent 执行（可读写文件、跑命令）">Agent</button>
       </div>
-      <select id="category" title="任务类别">
+      <select id="category" title="任务类别（自动识别会按问题内容判断，例如天气、新闻走联网检索）">
+        <option value="" selected>自动识别</option>
         <option value="general">通用</option>
         <option value="coding">编程</option>
         <option value="research">联网检索</option>
@@ -347,12 +348,12 @@ async function run() {
   S.localAnswers[ref] = '';
   const headers = {
     'Content-Type': 'application/json',
-    'X-Oasis-Category': $('category').value,
     'X-Oasis-Goal': $('goal').value,
     'X-Oasis-Source': 'dashboard',
     'X-Oasis-Client-Ref': ref
   };
   if (mode) headers['X-Oasis-Mode'] = mode;
+  if ($('category').value) headers['X-Oasis-Category'] = $('category').value;
   $('run').disabled = true;
   setTimeout(() => { $('run').disabled = false; }, 600);
   promptEl.value = ''; promptEl.style.height = 'auto';

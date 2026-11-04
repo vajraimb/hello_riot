@@ -26,6 +26,7 @@ type task = {
   status: string;
   executor: string;
   route_summary: string;
+  category_note: string;
   route: Json.t;
   timeline: Json.t list;
   answer: string;
@@ -58,6 +59,7 @@ let empty_task = fun id ->
     status = "running";
     executor = "";
     route_summary = "";
+    category_note = "";
     route = Json.null;
     timeline = [];
     answer = "";
@@ -78,15 +80,16 @@ let title_of_text = fun (s : string) ->
         StringBuilder.add_char out c);
   Portal_steps.clip (StringBuilder.contents out) 160
 
-(** Title of a chat request: its last user message. *)
-let title_of_body = fun (body : Json.t) ->
+let last_user_text = fun (body : Json.t) ->
   let messages = Json.get_field "messages" body |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[] in
   List.rev messages
   |> List.find ~fn:(fun m -> String.equal (str m "role" |> Option.unwrap_or ~default:"") "user")
   |> Option.map ~fn:(fun m ->
     Json.get_field "content" m |> Option.map ~fn:Portal_steps.content_text |> Option.unwrap_or ~default:"")
   |> Option.unwrap_or ~default:""
-  |> title_of_text
+
+(** Title of a chat request: its last user message. *)
+let title_of_body = fun (body : Json.t) -> title_of_text (last_user_text body)
 
 (* ---------- human-readable wording ---------- *)
 
@@ -198,6 +201,19 @@ let route_summary_of = fun ~goal ~category (data : Json.t) ->
       let score = match score_of c with Some s -> "（" ^ Int.to_string s ^ "）" | None -> "" in
       (if String.equal mode "agent" then "交给 agent " else "选用账户 ") ^ c ^ "：" ^ why ^ score ^ "；" ^ backup_txt ^ reject_txt
 
+(** Why the category is what it is, when Oasis inferred it. *)
+let category_note_of = fun (data : Json.t) ->
+  match str data "category_source" with
+  | Some "auto" ->
+      let hits =
+        Json.get_field "category_hits" data |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
+        |> List.filter_map ~fn:Json.get_string
+      in
+      let cat = category_text (str data "category" |> Option.unwrap_or ~default:"general") in
+      if List.is_empty hits then "未指定类别，按内容判定为「" ^ cat ^ "」"
+      else "按内容判定为「" ^ cat ^ "」（命中：" ^ String.concat "、" hits ^ "）"
+  | _ -> ""
+
 (* ---------- folding events ---------- *)
 
 let entry = fun kind fields -> Json.obj (("kind", Json.string kind) :: ("at", Json.int (now_ms ())) :: fields)
@@ -253,9 +269,11 @@ let apply_event = fun (t : task) ~type_ (data : Json.t) ->
         title = str data "title" |> Option.unwrap_or ~default:t.title;
         source = str data "source" |> Option.unwrap_or ~default:t.source;
         mode = str data "mode" |> Option.unwrap_or ~default:t.mode;
+        category_note = category_note_of data;
       }
   | "routed" ->
       let summary = route_summary_of ~goal:t.goal ~category:t.category data in
+      let summary = if String.is_empty t.category_note then summary else t.category_note ^ "，" ^ summary in
       push
         {
           t with

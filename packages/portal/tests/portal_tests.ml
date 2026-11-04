@@ -18,6 +18,7 @@ module Agent = Portal.Agent
 module Mcp = Portal.Mcp
 module Inbox = Portal.Inbox
 module Discover = Portal.Discover
+module Classify = Portal.Classify
 module Activity = Portal.Activity
 module Gateway = Portal.Gateway
 
@@ -1732,6 +1733,42 @@ let test_steps_clip_utf8 = fun _ctx ->
   Test.assert_equal ~expected:"你…" ~actual:(Steps.clip "你好" 4);
   Test.assert_equal ~expected:"abc" ~actual:(Steps.clip "abc" 5);
   Ok ()
+
+let test_classify_prompts = fun _ctx ->
+  let cat text =
+    let c, _ = Classify.classify text in
+    c
+  in
+  Test.assert_equal ~expected:"research" ~actual:(cat "后天上海的天气如何");
+  Test.assert_equal ~expected:"research" ~actual:(cat "今天美元兑人民币汇率多少");
+  Test.assert_equal ~expected:"research" ~actual:(cat "帮我查一下 riot 这个项目");
+  Test.assert_equal ~expected:"research" ~actual:(cat "What is the latest version of OCaml?");
+  Test.assert_equal ~expected:"coding" ~actual:(cat "这个 python 函数为什么报错");
+  Test.assert_equal ~expected:"coding" ~actual:(cat "```\nlet x = 1\n```\n解释一下");
+  Test.assert_equal ~expected:"coding" ~actual:(cat "现在这段代码怎么重构？");
+  Test.assert_equal ~expected:"writing" ~actual:(cat "帮我润色这封邮件");
+  Test.assert_equal ~expected:"general" ~actual:(cat "解释一下量子纠缠");
+  Test.assert_equal ~expected:"general" ~actual:(cat "let me know your thoughts on stoicism");
+  let _, hits = Classify.classify "后天上海的天气如何" in
+  Test.assert_equal ~expected:[ "天气"; "后天" ] ~actual:hits;
+  Ok ()
+
+let test_feed_explains_inferred_category = fun _ctx ->
+  let feed = Feed.create () in
+  let ev type_ data = Feed.apply feed ~type_ ~request_id:"r1" (Json.obj data) in
+  ev
+    "task_started"
+    [
+      ("category", Json.string "research");
+      ("category_source", Json.string "auto");
+      ("category_hits", Json.array [ Json.string "天气"; Json.string "后天" ]);
+    ];
+  ev "routed" [ ("chosen", Json.string "perplexity"); ("candidates", Json.array []) ];
+  match Feed.find feed "r1" with
+  | None -> Error "task not in feed"
+  | Some t ->
+      Test.assert_equal ~expected:true ~actual:(String.starts_with ~prefix:"按内容判定为「联网检索」（命中：天气、后天）" t.Feed.route_summary);
+      Ok ()
 
 let test_feed_folds_events = fun _ctx ->
   let feed = Feed.create () in
@@ -3482,6 +3519,8 @@ let tests =
     case "steps: answer joins messages and post-tool text" test_steps_answer_join;
     case "steps: clip keeps utf-8 valid" test_steps_clip_utf8;
     case ~size:Test.Large "agent: exit reaps helpers that keep stdout open" test_agent_exit_reaps_lingering_helpers;
+    case "classify: prompt content to category" test_classify_prompts;
+    case "feed: explains inferred category" test_feed_explains_inferred_category;
     case "feed: folds events into one task record" test_feed_folds_events;
     case ~size:Test.Large "feed: gateway records agent work steps" test_gateway_feed_records_agent_steps;
     case ~size:Test.Large "agent: watchdog timeout kills the whole process tree" test_agent_timeout_kills_process_tree;

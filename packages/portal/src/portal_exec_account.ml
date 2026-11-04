@@ -256,8 +256,15 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
     |> Option.unwrap_or ~default:1024
   in
   let est_in = est_input_tokens body in
-  let category =
-    get_header ctx "x-oasis-category" |> Option.unwrap_or ~default:"general"
+  let explicit_category =
+    match get_header ctx "x-oasis-category" |> Option.map ~fn:String.trim with
+    | Some c when not (String.is_empty c || String.equal c "auto") -> Some c
+    | _ -> None
+  in
+  let category, category_hits =
+    match explicit_category with
+    | Some c -> (c, [])
+    | None -> Portal_classify.classify (Portal_feed.last_user_text body)
   in
   let goal =
     get_header ctx "x-oasis-goal"
@@ -290,6 +297,8 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
           ("title", Json.string (Portal_feed.title_of_body body));
           ("source", Json.string (get_header ctx "x-oasis-source" |> Option.unwrap_or ~default:"api"));
           ("client_ref", Json.string (get_header ctx "x-oasis-client-ref" |> Option.unwrap_or ~default:""));
+          ("category_source", Json.string (match explicit_category with Some _ -> "header" | None -> "auto"));
+          ("category_hits", Json.array (List.map category_hits ~fn:Json.string));
           (
             "stream",
             Json.bool (Json.get_field "stream" body |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false)
@@ -308,10 +317,12 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
     | Some "agent" -> `Agent
     | Some "chat" -> `Chat
     | _ ->
+        (* an inferred category never escalates a plain request to agents *)
         if
-          List.any
-            config.Portal_config.policy.Portal_config.agent_categories
-            ~fn:(String.equal category)
+          Option.is_some explicit_category
+          && List.any
+               config.Portal_config.policy.Portal_config.agent_categories
+               ~fn:(String.equal category)
         then
           `Agent
         else

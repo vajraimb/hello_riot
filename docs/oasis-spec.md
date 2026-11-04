@@ -127,6 +127,14 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 硬约束之外还有**粘性会话**（`X-Oasis-Session` 头的多轮对话钉在同一账户）与
 **显式模式**（`X-Oasis-Mode: agent|chat` 覆盖类别默认规则）。
 
+**类别自动判定**（`Portal_classify`）：请求未带 `X-Oasis-Category`（或值为 `auto`；MCP `oasis_ask`
+未传 category 同理）时，按最后一条用户消息的关键词判定类别：含代码块 → coding；命中实时信息主题
+（天气、新闻、股价、汇率、最新版本…）或检索动作（查一下、搜索、URL…）→ research；时间词（今天、后天、
+最新…）+ 疑问且无代码迹象 → research；再依次 coding、writing，否则 general。判定结果与命中词随
+`task_started`（`category_source: auto`、`category_hits`）下发，控制台路由说明以
+「按内容判定为「联网检索」（命中：天气、后天）」开头。**推断出的类别不会自动切到 agent 模式**，
+只有显式类别头或 `X-Oasis-Mode` 才会。
+
 #### 2.3.1 当前实现的两处偏置（0.2 写成了"特性"，0.3 定义为缺陷）
 
 1. **价格未知被当成最便宜**。模型不在 KB 中时 `price_nano = 0`，而 `cost_score` 按候选内

@@ -370,7 +370,7 @@ let cli_usage =
    网关启用鉴权时设置环境变量 OASIS_AUTH_TOKEN"
 
 let cli_main = fun ~server ~args ->
-  let category = ref "general" in
+  let category = ref "auto" in
   let goal = ref "balanced" in
   let stream = ref true in
   match args with

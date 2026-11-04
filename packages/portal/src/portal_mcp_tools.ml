@@ -167,7 +167,11 @@ let mcp_tool_ask = fun (state : state) (params : Json.t) ->
   | Some prompt ->
       let config = Sync.Atomic.get state.config in
       let category =
-        mcp_get_str params "category" |> Option.unwrap_or ~default:"general"
+        match mcp_get_str params "category" with
+        | Some c when not (String.is_empty c || String.equal c "auto") -> c
+        | _ ->
+            let c, _ = Portal_classify.classify prompt in
+            c
       in
       let goal =
         mcp_get_str params "goal"

@@ -28,6 +28,7 @@ module Anthropic = Portal_anthropic
 module Agent = Portal_agent
 module Steps = Portal_steps
 module Feed = Portal_feed
+module Classify = Portal_classify
 module Mcp = Portal_mcp
 module Task = Portal_task
 module Inbox = Portal_inbox
