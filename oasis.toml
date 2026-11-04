@@ -365,8 +365,8 @@ latency = "slow"
 enabled = true
 concurrency_limit = 2
 
-# Grok CLI：本机 DNS 污染了 auth.x.ai / cli-chat-proxy.grok.com 等（CLI 报 prompt_ack_timeout），
-# Oasis 的 connect_ip 管不到子进程；这些域名在 /etc/hosts 写死后再改 enabled = true
+# Grok CLI：依赖 /etc/hosts 里写死的 x.ai / grok.com 域名（本机 DNS 污染，Oasis 的 connect_ip 管不到子进程）；
+# 报 prompt_ack_timeout 时先查 ~/.grok/logs/unified.jsonl 里连不上的域名
 [[agents]]
 name = "grok_cli"
 command = "grok"
@@ -382,7 +382,7 @@ weaknesses = []
 context_window = 256000
 max_output = 32768
 latency = "slow"
-enabled = false
+enabled = true
 concurrency_limit = 2
 
 [[routes]]
