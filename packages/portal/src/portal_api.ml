@@ -227,6 +227,38 @@ let handle_feed_task = fun (state : state) (ctx : Trail.ctx) ->
         ctx
         (Json.obj [ ("error", Json.string "unknown task (the feed keeps the newest tasks in memory only)") ])
 
+(** POST {"id", "rating": 1 | -1 | 0}: the user's verdict on a finished task
+    feeds the executor's learned quality for that category (0 withdraws). *)
+let handle_rate_task = fun (state : state) (ctx : Trail.ctx) ->
+  let body = parse_json_body ctx in
+  let rating = Json.get_field "rating" body |> Option.and_then ~fn:Json.get_int |> Option.unwrap_or ~default:0 in
+  let rating = if rating > 0 then 1 else if rating < 0 then -1 else 0 in
+  let bad msg = Trail.json ~status:Net.Http.Status.BadRequest ctx (Json.obj [ ("error", Json.string msg) ]) in
+  match Json.get_field "id" body |> Option.and_then ~fn:Json.get_string |> Option.and_then ~fn:(Portal_feed.find state.feed) with
+  | None -> Trail.json ~status:Net.Http.Status.NotFound ctx (Json.obj [ ("error", Json.string "unknown task") ])
+  | Some t when not (String.equal t.Portal_feed.status "ok") -> bad "only finished, successful tasks can be rated"
+  | Some t when String.is_empty t.Portal_feed.executor -> bad "task has no executor"
+  | Some t ->
+      let account = t.Portal_feed.executor in
+      let category = if String.is_empty t.Portal_feed.category then "general" else t.Portal_feed.category in
+      if t.Portal_feed.user_rating != 0 then
+        Portal_quality.unrecord state.quality ~account ~category ~score:(Portal_quality.of_rating t.Portal_feed.user_rating);
+      if rating != 0 then Portal_quality.record state.quality ~account ~category ~score:(Portal_quality.of_rating rating);
+      Portal_quality.save state.quality ~path:(quality_file state);
+      broadcast_event state ~type_:"task_rated" ~request_id:t.Portal_feed.id
+        ~data:(Json.obj [ ("by", Json.string "user"); ("rating", Json.int rating); ("executor", Json.string account) ]);
+      let q = Portal_quality.get state.quality ~account ~category in
+      Trail.json ctx
+        (Json.obj
+          [
+            ("ok", Json.bool true);
+            ("rating", Json.int rating);
+            ("executor", Json.string account);
+            ("category", Json.string category);
+            ("rated", Json.int q.Portal_quality.n);
+            ("mean", Json.int (Portal_quality.mean q));
+          ])
+
 let handle_list_alerts = fun (state : state) (ctx : Trail.ctx) ->
   let alerts = Portal_alerts.collect state ~home:(discover_home state) in
   Trail.json ctx (Json.obj [ ("alerts", Json.array (List.map alerts ~fn:Portal_alerts.alert_json)) ])

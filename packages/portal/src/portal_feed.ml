@@ -31,6 +31,11 @@ type task = {
   timeline: Json.t list;
   answer: string;
   error: string;
+  prompt: string;
+  user_rating: int;  (** -1 / 0 / 1 *)
+  review_score: int;  (** 0 = not reviewed, else 1..5 *)
+  review_reason: string;
+  reviewer: string;
 }
 
 type t = (string, task) ConcurrentHashMap.t
@@ -64,6 +69,11 @@ let empty_task = fun id ->
     timeline = [];
     answer = "";
     error = "";
+    prompt = "";
+    user_rating = 0;
+    review_score = 0;
+    review_reason = "";
+    reviewer = "";
   }
 
 (** One-line task title: the prompt with whitespace collapsed. *)
@@ -180,6 +190,10 @@ let parts_text = fun ~score (parts : Json.t) ->
       in
       Int.to_string score ^ " = "
       ^ String.concat " + " [ term "适配" (g "fit") wf; term "速度" (g "speed") wl; term "成本" (g "cost") wc; term "负载" (g "load") wd ]
+      ^ (if g "rated" > 0 then
+           "；适配 " ^ Int.to_string (g "fit") ^ " 由配置 " ^ Int.to_string (g "fit_static") ^ " 与 " ^ Int.to_string (g "rated")
+           ^ " 次评价（均 " ^ Int.to_string (g "rating") ^ "）合成"
+         else "")
       ^ "；" ^ lat
   | _ -> Int.to_string score
 
@@ -221,8 +235,10 @@ let route_summary_of = fun ~goal ~category (data : Json.t) ->
   match chosen with
   | None -> "没有可用的执行者" ^ reject_txt
   | Some c ->
+      let explored = Json.get_field "explored" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
       let why =
-        if String.equal mode "agent" then
+        if explored then "探索轮（每 10 次请求试 1 次记录少的候选，失败会回到常规首选）"
+        else if String.equal mode "agent" then
           category_text category ^ "任务里这个 agent 的适配分最高"
         else "按「" ^ goal_text goal ^ "」目标综合评分最高"
       in
@@ -307,6 +323,7 @@ let apply_event = fun (t : task) ~type_ (data : Json.t) ->
         source = str data "source" |> Option.unwrap_or ~default:t.source;
         mode = str data "mode" |> Option.unwrap_or ~default:t.mode;
         category_note = category_note_of data;
+        prompt = str data "prompt" |> Option.unwrap_or ~default:t.prompt;
       }
   | "routed" ->
       let summary = route_summary_of ~goal:t.goal ~category:t.category data in
@@ -365,15 +382,35 @@ let apply_event = fun (t : task) ~type_ (data : Json.t) ->
       let ok = Json.get_field "ok" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
       let chosen = str data "chosen" |> Option.unwrap_or ~default:t.executor in
       let error = str data "error" |> Option.unwrap_or ~default:(if ok then "" else "所有候选都失败了") in
+      let answer =
+        match str data "answer" with
+        | Some a when String.is_empty t.answer -> Portal_steps.clip a 60000
+        | _ -> t.answer
+      in
       push
         {
           t with
+          answer;
           status = (if ok then "ok" else "failed");
           finished_ms = now_ms ();
           executor = (if String.equal chosen "none" then t.executor else chosen);
           error;
         }
         (entry "done" [ ("ok", Json.bool ok); ("error", Json.string error) ])
+  | "task_rated" -> (
+      match str data "by" with
+      | Some "user" ->
+          let r = int_field data "rating" |> Option.unwrap_or ~default:0 in
+          let text = if r > 0 then "你评价：好 👍" else if r < 0 then "你评价：差 👎" else "你撤销了评价" in
+          push { t with user_rating = r } (entry "rating" [ ("text", Json.string text) ])
+      | _ ->
+          let s = int_field data "score" |> Option.unwrap_or ~default:0 in
+          let reason = str data "reason" |> Option.unwrap_or ~default:"" in
+          let reviewer = str data "reviewer" |> Option.unwrap_or ~default:"" in
+          push
+            { t with review_score = s; review_reason = reason; reviewer }
+            (entry "rating" [ ("text", Json.string ("抽检评审（" ^ reviewer ^ "）：" ^ Int.to_string s ^ "/5" ^ (if String.is_empty reason then "" else "，" ^ reason))) ])
+    )
   | _ -> t
 
 let evict = fun (feed : t) ->
@@ -416,6 +453,8 @@ let summary_json = fun (t : task) ->
       ("route_summary", Json.string t.route_summary);
       ("error", Json.string t.error);
       ("steps", Json.int (List.length t.timeline));
+      ("user_rating", Json.int t.user_rating);
+      ("review_score", Json.int t.review_score);
     ]
 
 let detail_json = fun (t : task) ->
@@ -425,6 +464,8 @@ let detail_json = fun (t : task) ->
         (fields
         @ [
             ("stream", Json.bool t.stream);
+            ("review_reason", Json.string t.review_reason);
+            ("reviewer", Json.string t.reviewer);
             ("route", t.route);
             ("timeline", Json.array (List.rev t.timeline));
             ("answer", Json.string t.answer);

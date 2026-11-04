@@ -77,7 +77,11 @@ let route_agents = fun (state : state) (config : Portal_config.t) (category : st
         rejects := { Portal_router.account = a.Portal_agent.name; reason = "concurrency_limit" } :: !rejects;
         None
       ) else
-        let fit = Portal_agent.fit a ~category in
+        let fit =
+          Portal_quality.blend
+            ~static:(Portal_agent.fit a ~category)
+            (Portal_quality.get state.quality ~account:a.Portal_agent.name ~category)
+        in
         let lat =
           if s.Portal_signals.latency_samples = 0 then 50
           else Portal_router.latency_score_agent ~ema_ms:s.Portal_signals.latency_ema_ms
@@ -105,9 +109,11 @@ let route_agents = fun (state : state) (config : Portal_config.t) (category : st
     attempts = [];
     scores = List.map sorted ~fn:(fun (a, sc) -> (a.Portal_agent.name, sc));
     parts = [];
+    explored = false;
     unpriced = [];
     handoffs = [];
   }
+  |> maybe_explore state
 
 let find_agent = fun (config : Portal_config.t) name ->
   List.find config.Portal_config.agents ~fn:(fun a -> String.equal a.Portal_agent.name name)

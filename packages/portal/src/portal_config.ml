@@ -36,6 +36,9 @@ type policy = {
   max_handoffs: int;
   handoff_notice: bool;
   session_ttl_s: int;
+  explore_every: int;  (** 0 = never explore *)
+  judge: string;  (** "account" or "account:model"; "" = no sampled reviews *)
+  judge_every: int;
 }
 
 type t = {
@@ -381,6 +384,13 @@ let load = fun path ->
                   session_ttl_s =
                     field policy_fields "session_ttl_s" |> Option.and_then ~fn:Toml.get_int
                     |> Option.unwrap_or ~default:600;
+                  explore_every =
+                    field policy_fields "explore_every" |> Option.and_then ~fn:Toml.get_int
+                    |> Option.unwrap_or ~default:10;
+                  judge = field policy_fields "judge" |> Option.and_then ~fn:Toml.get_string |> Option.unwrap_or ~default:"";
+                  judge_every =
+                    field policy_fields "judge_every" |> Option.and_then ~fn:Toml.get_int
+                    |> Option.unwrap_or ~default:10;
                 }
               in
               let errors = account_errors @ kb_errors @ route_errors @ agent_errors in

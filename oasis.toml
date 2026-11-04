@@ -402,3 +402,6 @@ accounts = ["deepseek_pro", "kimi_work", "openrouter", "dashscope_coding"]
 goal = "balanced"
 agent_categories = ["coding"]
 max_fallback = 1
+explore_every = 10                    # 每 10 次路由试 1 次记录少的候选；0 = 关闭
+judge = "deepseek_pro:deepseek-flash" # 抽检评审用的账户:模型；留空 = 不抽检
+judge_every = 10                      # 每 10 个成功任务抽 1 个评审

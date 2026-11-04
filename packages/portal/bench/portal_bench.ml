@@ -65,6 +65,9 @@ let bench_config =
         max_handoffs = 2;
         handoff_notice = true;
         session_ttl_s = 600;
+        explore_every = 0;
+        judge = "";
+        judge_every = 10;
       };
   }
 
@@ -82,6 +85,7 @@ let bench_lookups =
           requests_in_window = 0;
           parked = false;
         });
+    quality = (fun ~account:_ ~category:_ -> { Portal.Quality.sum = 0; n = 0 });
   }
 
 let bench_task =

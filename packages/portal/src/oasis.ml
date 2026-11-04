@@ -543,6 +543,9 @@ let run_self_test = fun () ->
                     max_handoffs = 2;
                     handoff_notice = true;
                     session_ttl_s = 600;
+                    explore_every = 0;
+                    judge = "";
+                    judge_every = 10;
                   };
               }
             in

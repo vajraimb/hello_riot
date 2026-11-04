@@ -182,13 +182,30 @@ let mcp_tool_ask = fun (state : state) (params : Json.t) ->
       let task =
         { Portal_router.model; category; est_in_tokens = 0; est_out_tokens = max_tokens |> Option.unwrap_or ~default:1024 }
       in
+      let request_id = new_request_id () in
+      broadcast_event
+        state
+        ~type_:"task_started"
+        ~request_id
+        ~data:
+          (Json.obj
+            [
+              ("category", Json.string category);
+              ("goal", Json.string goal);
+              ("title", Json.string (Portal_feed.title_of_text prompt));
+              ("prompt", Json.string (Portal_steps.clip prompt 8000));
+              ("source", Json.string "mcp");
+              ("mode", Json.string "account");
+            ]);
       let decision =
         Portal_router.route_scored
           config
           (make_lookups state)
           ~goal:(Portal_router.goal_of_string goal)
           task
+        |> maybe_explore state
       in
+      emit_routed state ~request_id ~mode:"account" decision;
       let candidates =
         match decision.Portal_router.chosen with
         | None -> []
@@ -196,6 +213,7 @@ let mcp_tool_ask = fun (state : state) (params : Json.t) ->
       in
       if List.is_empty candidates then (
         record_decision state decision;
+        emit_task_done ~error:"没有可用的账户（见路由说明里的排除原因）" state ~request_id ~chosen:None ~attempts:0 ~ok:false;
         let rejs : Portal_router.rejected list = decision.Portal_router.rejected in
         Error
           ("no_account_available: "
@@ -219,7 +237,7 @@ let mcp_tool_ask = fun (state : state) (params : Json.t) ->
             ~messages
             ~max_tokens
             ~session:None
-            ~request_id:(new_request_id ())
+            ~request_id
             ()
         in
         let chosen =
@@ -283,6 +301,7 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                 ("category", Json.string category);
                 ("goal", Json.string "-");
                 ("title", Json.string (Portal_feed.title_of_text prompt));
+                ("prompt", Json.string (Portal_steps.clip prompt 8000));
                 ("source", Json.string "mcp");
                 ("mode", Json.string "agent");
                 ("stream", Json.bool false);

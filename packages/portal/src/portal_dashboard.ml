@@ -89,6 +89,10 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
 .dtitle{font-size:15px;font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .chips{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;font-size:12px;color:var(--muted)}
 .chips b{color:var(--text);font-weight:500}
+.rate{display:inline-flex;gap:4px;align-items:center}
+.rate button{background:none;border:1px solid var(--line);border-radius:4px;color:var(--muted);padding:0 7px;line-height:20px;cursor:pointer;font-size:12px}
+.rate button:hover{border-color:var(--muted);color:var(--text)}
+.rate button.on{border-color:var(--accent);color:var(--text);background:rgba(88,166,255,.12)}
 .pill{font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px}
 .pill.ok{background:rgba(63,185,80,.14);color:var(--ok)}
 .pill.failed{background:rgba(248,81,73,.14);color:var(--err)}
@@ -432,6 +436,15 @@ function select(id) {
 }
 
 /* ---------- detail ---------- */
+async function rate(id, rating) {
+  try {
+    const r = await fetch('/api/feed/rate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, rating }) });
+    const j = await r.json();
+    if (!r.ok) { toast(j.error || '评价失败'); return; }
+    toast(rating ? '已记录：' + j.executor + ' 在这类任务上共 ' + j.rated + ' 次评价，均分 ' + j.mean : '已撤销评价');
+    loadDetail(false);
+  } catch (e) { toast('评价失败'); }
+}
 async function loadDetail(scrollEnd) {
   if (!S.sel) return;
   try {
@@ -444,7 +457,8 @@ async function loadDetail(scrollEnd) {
 function partsText(p) {
   if (!p) return '';
   const lat = p.samples ? '均 ' + fmtDur(p.latency_ema_ms) + ' / ' + p.samples + ' 次' : '无耗时记录';
-  return '适配 ' + p.fit + ' · 速度 ' + p.speed + ' · 成本 ' + p.cost + ' · 负载 ' + p.load + ' · ' + lat;
+  const fit = p.rated ? p.fit + '（配置 ' + p.fit_static + '，' + p.rated + ' 次评价均 ' + p.rating + '）' : p.fit;
+  return '适配 ' + fit + ' · 速度 ' + p.speed + ' · 成本 ' + p.cost + ' · 负载 ' + p.load + ' · ' + lat;
 }
 function scoreTable(route) {
   const cands = (route && route.candidates) || [];
@@ -478,7 +492,12 @@ function renderDetail(scrollEnd) {
         '<span>耗时 <b>' + fmtDur(d.duration_ms) + '</b></span>' +
         (nSteps ? '<span>工具 <b>' + nSteps + '</b> 次</span>' : '') +
         '<span>来源 ' + esc(SRC[d.source] || d.source) + '</span>' +
-        '<span class="mono dim" style="cursor:pointer" title="复制 request id" onclick="copy(\'' + esc(d.id) + '\')">' + esc(d.id) + '</span></div>' +
+        '<span class="mono dim" style="cursor:pointer" title="复制 request id" onclick="copy(\'' + esc(d.id) + '\')">' + esc(d.id) + '</span>' +
+        (d.review_score ? '<span title="' + esc((d.reviewer || '') + '：' + (d.review_reason || '')) + '">抽检 <b>' + d.review_score + '/5</b></span>' : '') +
+        (d.status === 'ok' && d.executor ? '<span class="rate" title="你的评价会计入 ' + esc(d.executor) + ' 在这类任务上的质量分，影响以后的路由">' +
+          '<button class="' + (d.user_rating > 0 ? 'on' : '') + '" onclick="rate(\'' + esc(d.id) + '\',' + (d.user_rating > 0 ? 0 : 1) + ')">👍</button>' +
+          '<button class="' + (d.user_rating < 0 ? 'on' : '') + '" onclick="rate(\'' + esc(d.id) + '\',' + (d.user_rating < 0 ? 0 : -1) + ')">👎</button></span>' : '') +
+        '</div>' +
       (d.route_summary ? '<div class="route"><span class="k">路由</span><div style="min-width:0">' + esc(d.route_summary) + scoreTable(d.route) + '</div></div>' : '') +
       (d.status === 'failed' && d.error ? '<div class="route" style="border-color:rgba(248,81,73,.4)"><span class="k" style="color:var(--err)">失败</span><div>' + esc(d.error) + '</div></div>' : '') +
     '</div>' +
@@ -505,7 +524,7 @@ function renderDetail(scrollEnd) {
 function renderAnswer(answer, d) {
   if (!answer) {
     return '<div class="empty">' + (d.status === 'running' ? '等待输出…' :
-      (d.source === 'dashboard' ? '没有输出' : '问答类请求的回答只返回给调用方，不在控制台留存；Agent 任务的说明文字见「执行过程」')) + '</div>';
+      '没有输出') + '</div>';
   }
   const parts = String(answer).split(/```[^\n]*\n?/);
   const html = parts.map((p, i) => i % 2 ? '<pre>' + esc(p) + '</pre>' : esc(p).replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')).join('');
@@ -534,6 +553,7 @@ function renderTimeline(d) {
           (e.error && e.error !== e.hint ? '<div class="err-raw">' + esc(e.error) + '</div>' : '') + ' <span class="muted">· ' + fmtDur(e.latency_ms) + '</span>');
         break;
       case 'handoff': row('ho', e, '⇄', '<span class="lbl" style="color:var(--warn)">切换 ' + esc(e.level) + '</span>' + esc(e.text)); break;
+      case 'rating': row('ok', e, '★', '<span class="lbl">评价</span>' + esc(e.text)); break;
       case 'done': row(e.ok ? 'ok' : 'bad', e, '■', e.ok ? '任务完成' : '<span class="hl">任务失败' + (e.error ? '：' + esc(e.error) : '') + '</span>'); break;
       case 'step': {
         const ag = e.agent ? ' <span class="dim mono" style="font-size:11px">' + esc(e.agent) + '</span>' : '';

@@ -50,6 +50,7 @@ type decision = {
   attempts: attempt list;
   scores: (string * int) list;
   parts: (string * Json.t) list;
+  explored: bool;
   unpriced: string list;
   handoffs: handoff list;
 }
@@ -91,6 +92,7 @@ let empty_decision = fun category ->
     attempts = [];
     scores = [];
     parts = [];
+    explored = false;
     unpriced = [];
     handoffs = [];
   }
@@ -175,6 +177,7 @@ let decision_json = fun (d : decision) ->
                 ]))
       );
       ("handoffs", Json.array (List.map d.handoffs ~fn:handoff_json));
+      ("explored", Json.bool d.explored);
     ]
 
 let route = fun (config : Portal_config.t) (lookups : lookups) (task : task) ->
@@ -275,6 +278,7 @@ let route = fun (config : Portal_config.t) (lookups : lookups) (task : task) ->
     attempts = [];
     scores = [];
     parts = [];
+    explored = false;
     unpriced = [];
     handoffs = [];
   }
@@ -285,6 +289,7 @@ type scored_lookups = {
   month_spent: string -> int;
   day_requests: string -> int;
   snapshot: string -> account_snapshot;
+  quality: account:string -> category:string -> Portal_quality.stat;
 }
 
 type weights = {
@@ -341,6 +346,7 @@ let route_scored =
           ~fn:(fun a -> a.Portal_config.name)
   in
   let rejects = ref [] in
+  let static_fits = ref [] in
   (* returns (name, model, price_nano (None = unknown), fit, (latency ema, samples), load_score) *)
   let check (name : string) : (string * string * int option * int * (int * int) * int) option =
     match Portal_config.find_account config name with
@@ -388,11 +394,13 @@ let route_scored =
                           ~out_tokens:task.est_out_tokens)
                   | _ -> None
                 in
-                let fit =
+                let fit_static =
                   match kb_entry with
                   | None -> 50
                   | Some kbe -> Portal_kb.fit kbe ~category:task.category
                 in
+                let q = lookups.quality ~account:name ~category:task.category in
+                let fit = Portal_quality.blend ~static:fit_static q in
                 let spent = lookups.month_spent name in
                 let budget_ok =
                   if acc.Portal_config.monthly_budget_nano <= 0 then
@@ -423,14 +431,15 @@ let route_scored =
                   && breaker_ok
                   && rpm_ok
                 in
-                if ok then
+                if ok then (
+                  static_fits := (name, (fit_static, q)) :: !static_fits;
                   Some
                     ( name,
                       model,
                       price_nano,
                       fit,
                       (snap.latency_ema_ms, snap.latency_samples),
-                      load_score ~in_flight:snap.in_flight )
+                      load_score ~in_flight:snap.in_flight ))
                 else (
                   let reason =
                     if not fits_context then
@@ -476,6 +485,18 @@ let route_scored =
         Json.obj
           [
             ("fit", Json.int fit);
+            (
+              "fit_static",
+              Json.int (List.find !static_fits ~fn:(fun (n, _) -> String.equal n name) |> Option.map ~fn:(fun (_, (f, _)) -> f) |> Option.unwrap_or ~default:fit)
+            );
+            (
+              "rated",
+              Json.int (List.find !static_fits ~fn:(fun (n, _) -> String.equal n name) |> Option.map ~fn:(fun (_, (_, q)) -> q.Portal_quality.n) |> Option.unwrap_or ~default:0)
+            );
+            (
+              "rating",
+              Json.int (List.find !static_fits ~fn:(fun (n, _) -> String.equal n name) |> Option.map ~fn:(fun (_, (_, q)) -> Portal_quality.mean q) |> Option.unwrap_or ~default:0)
+            );
             ("cost", Json.int (cost_score price));
             ("speed", Json.int (latency_score ~fastest_ms ~ema_ms:ema ~samples:n));
             ("load", Json.int load);
@@ -528,8 +549,37 @@ let route_scored =
     attempts = [];
     scores = List.map sorted ~fn:(fun (_, name, _, s) -> (name, s));
     parts;
+    explored = false;
     unpriced =
       List.filter_map passing ~fn:(fun (name, _, p, _, _, _) ->
         match p with None -> Some name | Some _ -> None);
     handoffs = [];
   }
+
+(* ---------- exploration ---------- *)
+
+(** Candidates measured fewer times than this are worth trying. *)
+let explore_min_samples = 5
+
+(** Promote the least-measured passing candidate to first choice, keeping
+    the usual winner as its first fallback. Unchanged when every candidate
+    already has enough samples. *)
+let explore = fun (d : decision) ~(samples : string -> int) ->
+  match d.chosen with
+  | None -> d
+  | Some top ->
+      let pick =
+        List.fold_left d.scores ~init:None ~fn:(fun best (name, _) ->
+          let n = samples name in
+          if String.equal name top || n >= explore_min_samples then best
+          else
+            match best with
+            | Some (_, bn) when bn <= n -> best
+            | _ -> Some (name, n))
+      in
+      match pick with
+      | None -> d
+      | Some (x, _) ->
+          let rest = List.filter d.fallback_order ~fn:(fun a -> not (String.equal a x)) in
+          let fallback = List.take (top :: rest) ~len:(max 1 (List.length d.fallback_order)) in
+          { d with chosen = Some x; fallback_order = fallback; explored = true }

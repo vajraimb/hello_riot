@@ -217,6 +217,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       record_decision cc.c_state decision;
       emit_attempt_finished cc.c_state ~request_id:cc.request_id ~account:cs.current_account ~status:(Some 200) ~latency_ms ~error:None;
       emit_task_done
+        ~answer:cs.sent_text
         cc.c_state
         ~request_id:cc.request_id
         ~chosen:(Some cs.current_account)

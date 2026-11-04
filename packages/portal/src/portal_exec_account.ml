@@ -201,7 +201,7 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
                         }
                       in
                       record_decision state decision';
-                      emit_task_done state ~request_id ~chosen:(Some name) ~attempts:(List.length acc + 1) ~ok:true;
+                      emit_task_done ~answer:(response_text resp_body_conv) state ~request_id ~chosen:(Some name) ~attempts:(List.length acc + 1) ~ok:true;
                       (* re-pin the session to the account that actually
                          served the request (fallback may have switched) *)
                       (
@@ -307,6 +307,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
           ("category", Json.string category);
           ("goal", Json.string goal_str);
           ("title", Json.string (Portal_feed.title_of_body body));
+          ("prompt", Json.string (Portal_steps.clip (Portal_feed.last_user_text body) 8000));
           ("source", Json.string (get_header ctx "x-oasis-source" |> Option.unwrap_or ~default:"api"));
           ("client_ref", Json.string (get_header ctx "x-oasis-client-ref" |> Option.unwrap_or ~default:""));
           ("category_source", Json.string (match explicit_category with Some _ -> "header" | None -> "auto"));
@@ -353,6 +354,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
       (make_lookups state)
       ~goal
       task
+    |> maybe_explore state
   in
   (* sticky session: if the session is pinned to an account that still
      passes the hard constraints, prefer it (multi-turn context stays on

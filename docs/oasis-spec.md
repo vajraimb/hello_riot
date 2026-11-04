@@ -146,6 +146,25 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
    应改为"填上前成本调度不生效"。**[0.3 新增]**：启动时若 goal 为 cheapest 且 KB 中已知价格的
    模型 < 2 个，日志打 WARN；`GET /api/accounts` 返回 `cost_routing_effective: false`。
 
+#### 2.3.3 学习质量与探索
+
+**质量**（`Portal_quality`，按「执行者 × 类别」累积 0–100 分，持久化 `.oasis-data/quality.json`）：
+
+- 来源一：控制台对成功任务点 👍（100）/ 👎（0），`POST /api/feed/rate {"id", "rating": 1|-1|0}`；
+  改评价会先撤回旧的那次，0 = 撤销。
+- 来源二：抽检评审（`Portal_judge`，独立 actor，每 5s 扫一次任务流）：每 `policy.judge_every`（默认 10）个
+  成功且有问题/回答文本的任务抽 1 个，交 `policy.judge`（`账户` 或 `账户:模型`，本机为
+  `deepseek_pro:deepseek-flash`）打 1–5 分（映射 0/25/50/75/100），理由写进任务时间线。执行者是评审账户本身
+  时跳过、顺延给下一个。留空 `judge` 即关闭。
+- 合成：`fit = (配置适配分 × 5 + 评价分之和) / (5 + 评价次数)`——配置分相当于 5 次先验评价，评价越多越以实测为准。
+  账户池与 agent 池都用。`parts` 带 `fit_static / rated / rating`，路由说明写"适配 X 由配置 Y 与 N 次评价（均 Z）合成"。
+- 为此账户类任务的最终回答随 `task_done.answer` 进入任务流（原先只有 agent 任务有），问题原文随
+  `task_started.prompt`（截 8000 字）。
+
+**探索**：每 `policy.explore_every`（默认 10，0 关闭）次路由决策（账户池、agent 池、MCP 共用计数）有 1 次
+把**测量次数 < 5** 的候选里次数最少者提为首选，常规首选退为第一备选（失败即回落）；所有候选都已测够 5 次时
+不探索。`routed.explored = true`，路由说明标明"探索轮"。
+
 #### 2.3.2 时延分的量纲问题
 
 **[已修正]** 账户池时延分改为候选内相对分：`100 × 最快者 EMA / 本账户 EMA`（同速 100、慢一倍 50、
@@ -154,8 +173,7 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 EMA 与样本数持久化到 `.oasis-data/latency.json`（每个 `task_done` 写一次，启动加载）。
 `best` 权重由 70/10/10/10 调为 60/10/20/10：同速时强模型胜，慢几十倍时让位。
 每个候选的四项分量（fit/cost/speed/load、EMA、样本数、权重）随 `routed` 事件的 `candidates[].parts`
-与 decision 的 `scores[].parts` 下发，控制台路由说明写出算式。已知局限：只学"快慢"，不学"答得好不好"；
-没有探索机制，从未被选中的账户一直是中性分。以下为历史记录：
+与 decision 的 `scores[].parts` 下发，控制台路由说明写出算式。以下为历史记录：
 
 `latency_score = 100 - EMA/20`：EMA ≥ 2000ms 即归零。API 账户首字节通常 200–1500ms，有区分度；
 本地 agent 任务动辄 30–300s，**所有 agent 在 fastest 下时延分恒为 0**，fastest 对 agent 池无意义。

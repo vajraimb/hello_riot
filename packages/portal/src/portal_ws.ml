@@ -44,6 +44,7 @@ let emit_routed = fun (state : state) ~(request_id : string) ~(mode : string) (d
       (Json.obj
         [
           ("mode", Json.string mode);
+          ("explored", Json.bool d.Portal_router.explored);
           ("chosen", d.Portal_router.chosen |> Option.map ~fn:Json.string |> Option.unwrap_or ~default:Json.null);
           (
             "candidates",
@@ -83,7 +84,7 @@ let emit_attempt_finished = fun (state : state) ~(request_id : string) ~(account
            | Some e -> [ ("error", Json.string e) ]
            | None -> [])))
 
-let emit_task_done = fun ?(error = "") (state : state) ~(request_id : string) ~(chosen : string option) ~(attempts : int) ~(ok : bool) ->
+let emit_task_done = fun ?(error = "") ?(answer = "") (state : state) ~(request_id : string) ~(chosen : string option) ~(attempts : int) ~(ok : bool) ->
   broadcast_event
     state
     ~type_:"task_done"
@@ -95,7 +96,8 @@ let emit_task_done = fun ?(error = "") (state : state) ~(request_id : string) ~(
            ("attempts", Json.int attempts);
            ("ok", Json.bool ok);
          ]
-        @ (if String.is_empty error then [] else [ ("error", Json.string (Portal_signals.redact_secrets error)) ])))
+        @ (if String.is_empty error then [] else [ ("error", Json.string (Portal_signals.redact_secrets error)) ])
+        @ if String.is_empty answer then [] else [ ("answer", Json.string (Portal_steps.clip answer 60000)) ]))
 
 let redact_step = fun (step : Json.t) ->
   match step with

@@ -22,7 +22,13 @@ module Classify = Portal.Classify
 module Activity = Portal.Activity
 module Gateway = Portal.Gateway
 
-let unique_dir = fun prefix -> "./.oasis-test-data/" ^ prefix ^ "-" ^ Int.to_string (Signals.now_ms ())
+let dir_seq = ref 0
+
+(* learned latency / quality persist in data_dir: each gateway config gets
+   its own so tests do not learn from each other *)
+let unique_dir = fun prefix ->
+  dir_seq := !dir_seq + 1;
+  "./.oasis-test-data/" ^ prefix ^ "-" ^ Int.to_string (Signals.now_ms ()) ^ "-" ^ Int.to_string !dir_seq
 
 
 (* ---------- chunked decoding ---------- *)
@@ -503,7 +509,7 @@ let mk_config = fun ~accounts ~kb ~routes ~max_fallback ->
   {
     Config.server_host = "127.0.0.1";
     server_port = 0;
-    data_dir = "./.oasis-test-data";
+    data_dir = unique_dir "gw";
     auth_token_env = None;
     accounts;
     agents = [];
@@ -517,6 +523,9 @@ let mk_config = fun ~accounts ~kb ~routes ~max_fallback ->
         max_handoffs = 2;
         handoff_notice = true;
         session_ttl_s = 600;
+        explore_every = 0;
+        judge = "";
+        judge_every = 10;
       };
   }
 
@@ -886,6 +895,7 @@ let mk_scored_lookups = fun ~spent ~day ~snap ->
     Router.month_spent = spent;
     day_requests = day;
     snapshot = snap;
+    quality = (fun ~account:_ ~category:_ -> { Portal.Quality.sum = 0; n = 0 });
   }
 
 let test_router_v2_cheapest_goal = fun _ctx ->
@@ -1817,7 +1827,7 @@ let mk_config_agents = fun ~accounts ~kb ~routes ~max_fallback ~agents ->
   {
     Config.server_host = "127.0.0.1";
     server_port = 0;
-    data_dir = "./.oasis-test-data";
+    data_dir = unique_dir "gw";
     auth_token_env = None;
     accounts;
     agents;
@@ -1831,6 +1841,9 @@ let mk_config_agents = fun ~accounts ~kb ~routes ~max_fallback ~agents ->
         max_handoffs = 2;
         handoff_notice = true;
         session_ttl_s = 600;
+        explore_every = 0;
+        judge = "";
+        judge_every = 10;
       };
   }
 
@@ -3118,6 +3131,103 @@ let test_router_best_avoids_very_slow = fun _ctx ->
   Test.assert_equal ~expected:2 ~actual:(List.length d2.Router.parts);
   Ok ()
 
+let test_quality_blend = fun _ctx ->
+  let q = Portal.Quality.create () in
+  let get () = Portal.Quality.get q ~account:"a" ~category:"coding" in
+  Test.assert_equal ~expected:100 ~actual:(Portal.Quality.blend ~static:100 (get ()));
+  for _ = 1 to 5 do Portal.Quality.record q ~account:"a" ~category:"coding" ~score:0 done;
+  Test.assert_equal ~expected:50 ~actual:(Portal.Quality.blend ~static:100 (get ()));
+  Portal.Quality.unrecord q ~account:"a" ~category:"coding" ~score:0;
+  Test.assert_equal ~expected:4 ~actual:(get ()).Portal.Quality.n;
+  Test.assert_equal ~expected:0 ~actual:(Portal.Quality.get q ~account:"a" ~category:"writing").Portal.Quality.n;
+  Test.assert_equal ~expected:75 ~actual:(Portal.Quality.of_review 4);
+  Ok ()
+
+let test_router_explore = fun _ctx ->
+  let d =
+    { (Router.empty_decision "general") with
+      Router.chosen = Some "a"; fallback_order = [ "b" ]; scores = [ ("a", 90); ("b", 80); ("c", 70) ] }
+  in
+  let samples = function "a" -> 10 | "b" -> 3 | _ -> 0 in
+  let e = Router.explore d ~samples in
+  Test.assert_equal ~expected:(Some "c") ~actual:e.Router.chosen;
+  Test.assert_equal ~expected:[ "a" ] ~actual:e.Router.fallback_order;
+  Test.assert_equal ~expected:true ~actual:e.Router.explored;
+  let settled = Router.explore d ~samples:(fun _ -> 9) in
+  Test.assert_equal ~expected:(Some "a") ~actual:settled.Router.chosen;
+  Test.assert_equal ~expected:false ~actual:settled.Router.explored;
+  Ok ()
+
+let test_judge_parse = fun _ctx ->
+  Test.assert_equal
+    ~expected:(Some (4, "准确"))
+    ~actual:(Portal.Judge.parse_verdict "```json\n{\"score\": 4, \"reason\": \"准确\"}\n```");
+  Test.assert_equal ~expected:None ~actual:(Portal.Judge.parse_verdict "{\"score\": 9}");
+  Test.assert_equal ~expected:None ~actual:(Portal.Judge.parse_verdict "no json");
+  Test.assert_equal ~expected:("deepseek_pro", Some "deepseek-flash") ~actual:(Portal.Judge.parse_judge "deepseek_pro:deepseek-flash");
+  Test.assert_equal ~expected:("kimi_work", None) ~actual:(Portal.Judge.parse_judge "kimi_work");
+  Ok ()
+
+let test_feed_ratings_and_answer = fun _ctx ->
+  let feed = Feed.create () in
+  let ev type_ data = Feed.apply feed ~type_ ~request_id:"r1" (Json.obj data) in
+  ev "task_started" [ ("prompt", Json.string "q?"); ("category", Json.string "general") ];
+  ev "task_done" [ ("chosen", Json.string "acc"); ("ok", Json.bool true); ("answer", Json.string "the answer") ];
+  ev "task_rated" [ ("by", Json.string "user"); ("rating", Json.int (-1)) ];
+  ev "task_rated" [ ("by", Json.string "judge"); ("score", Json.int 2); ("reason", Json.string "不准"); ("reviewer", Json.string "j") ];
+  match Feed.find feed "r1" with
+  | None -> Error "missing"
+  | Some t ->
+      Test.assert_equal ~expected:"q?" ~actual:t.Feed.prompt;
+      Test.assert_equal ~expected:"the answer" ~actual:t.Feed.answer;
+      Test.assert_equal ~expected:(-1) ~actual:t.Feed.user_rating;
+      Test.assert_equal ~expected:2 ~actual:t.Feed.review_score;
+      Ok ()
+
+let test_gateway_rating_feeds_routing = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      Mock.set_scenario (nth_mock mocks 0) { (Mock.default_scenario) with body = openai_ok_body ~content:"fine" };
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let body =
+            Json.to_string
+              (Json.obj [ ("model", Json.string "m-x"); ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "q") ] ]) ])
+          in
+          let chat () = gw_post ~port:gw.port ~path:"/v1/chat/completions" ~headers:[ ("Content-Type", "application/json") ] ~body in
+          match chat () with
+          | Error e -> Error e
+          | Ok _ -> (
+              match gw_get ~port:gw.port ~path:"/api/feed?limit=1" with
+              | Error e -> Error e
+              | Ok (_, feed_body) -> (
+                  let id =
+                    Json.from_string feed_body |> Result.to_option
+                    |> Option.and_then ~fn:(Json.get_field "tasks") |> Option.and_then ~fn:Json.get_array
+                    |> Option.and_then ~fn:List.head |> Option.map ~fn:(fun t -> h_field_str t "id") |> Option.unwrap_or ~default:""
+                  in
+                  let rate r =
+                    gw_post ~port:gw.port ~path:"/api/feed/rate" ~headers:[ ("Content-Type", "application/json") ]
+                      ~body:(Json.to_string (Json.obj [ ("id", Json.string id); ("rating", Json.int r) ]))
+                  in
+                  match rate (-1) with
+                  | Error e -> Error e
+                  | Ok (st, rb) ->
+                      Test.assert_equal ~expected:200 ~actual:st;
+                      Test.assert_equal ~expected:true ~actual:(String.contains rb "\"rated\":1");
+                      (* changing the verdict replaces it rather than adding a second one *)
+                      (match rate 1 with
+                       | Ok (_, rb2) -> Test.assert_equal ~expected:true ~actual:(String.contains rb2 "\"mean\":100")
+                       | Error e -> Test.assert_equal ~expected:"" ~actual:e);
+                      Test.assert_equal ~expected:true ~actual:(String.contains rb "\"rated\":1");
+                      Ok ()
+                )
+            )
+        )
+    )
+
 let test_upstream_body_max_tokens_passthrough = fun _ctx ->
   let messages = Json.array [] in
   let has_max b = String.contains b "max_tokens" in
@@ -3644,6 +3754,11 @@ let tests =
     case "router: latency scored relative to the fastest" test_router_relative_latency;
     case "router: best goal avoids a very slow account" test_router_best_avoids_very_slow;
     case "upstream: max_tokens only when the client sets it" test_upstream_body_max_tokens_passthrough;
+    case "quality: ratings blend into fit" test_quality_blend;
+    case "router: exploration promotes the least-measured" test_router_explore;
+    case "judge: verdict and spec parsing" test_judge_parse;
+    case "feed: ratings, review and final answer" test_feed_ratings_and_answer;
+    case "gateway: user rating feeds learned quality" test_gateway_rating_feeds_routing;
     case "feed: explains inferred category" test_feed_explains_inferred_category;
     case "stream: reasoning-only answer fails over" test_stream_reasoning_only_fails_over;
     case "non-stream: empty answer fails over" test_nonstream_empty_answer_fails_over;

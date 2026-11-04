@@ -28,6 +28,8 @@ type state = {
   decision_history: Json.t list Sync.Atomic.t;
   decisions_appended: int Sync.Atomic.t;
   feed: Portal_feed.t;
+  quality: Portal_quality.t;
+  route_turns: int Sync.Atomic.t;
 }
 
 (* ---------- helpers ---------- *)
@@ -155,7 +157,24 @@ let make_lookups = fun (state : state) ->
     Portal_router.month_spent = (fun a -> Portal_ledger.month_spent state.ledger a);
     day_requests = (fun a -> Portal_ledger.day_requests state.ledger a);
     snapshot = (fun a -> snapshot_of state a);
+    quality = (fun ~account ~category -> Portal_quality.get state.quality ~account ~category);
   }
+
+let quality_file = fun (state : state) -> data_path state "quality.json"
+
+(** True on every [policy.explore_every]-th routing decision. *)
+let explore_turn = fun (state : state) ->
+  let every = (Sync.Atomic.get state.config).Portal_config.policy.Portal_config.explore_every in
+  let n = Sync.Atomic.get state.route_turns + 1 in
+  Sync.Atomic.set state.route_turns n;
+  if every <= 0 then false else n mod every = 0
+
+(** Applies the exploration turn to a decision; [samples] counts how often
+    each candidate has been measured. *)
+let maybe_explore = fun (state : state) (d : Portal_router.decision) ->
+  if explore_turn state then
+    Portal_router.explore d ~samples:(fun a -> (Portal_signals.get state.signals a).Portal_signals.latency_samples)
+  else d
 
 let audit_file = fun (state : state) ->
   let config = Sync.Atomic.get state.config in

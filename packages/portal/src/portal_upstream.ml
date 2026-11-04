@@ -257,6 +257,19 @@ let extract_delta_content = fun (data : string) ->
             ""
     )
 
+(** Assistant text of a non-stream OpenAI-style response ("" if none). *)
+let response_text = fun (body : string) ->
+  match Json.from_string body with
+  | Error _ -> ""
+  | Ok j ->
+      Json.get_field "choices" j
+      |> Option.and_then ~fn:Json.get_array
+      |> Option.and_then ~fn:List.head
+      |> Option.and_then ~fn:(fun c -> Json.get_field "message" c)
+      |> Option.and_then ~fn:(fun m -> Json.get_field "content" m)
+      |> Option.and_then ~fn:Json.get_string
+      |> Option.unwrap_or ~default:""
+
 (** For a 200 OpenAI-style response with no answer and no tool calls: the
     error code to fail over with. *)
 let empty_answer_of = fun (body : string) ->
