@@ -330,7 +330,7 @@ concurrency_limit = 2
 [[agents]]
 name = "gemini_cli"
 command = "gemini"
-args = ["--skip-trust", "--approval-mode", "yolo", "-p", "{prompt}"]
+args = ["--skip-trust", "--approval-mode", "yolo", "-o", "stream-json", "-p", "{prompt}"]
 models = []
 home = "/Users/vajra"
 workdir = ""
@@ -350,7 +350,7 @@ env_passthrough = ["GEMINI_API_KEY"]
 [[agents]]
 name = "kimi_cli"
 command = "kimi"
-args = ["--print", "--final-message-only", "--yolo", "-p", "{prompt}"]
+args = ["--print", "--output-format", "stream-json", "--yolo", "-p", "{prompt}"]
 models = []
 home = "/Users/vajra"
 workdir = ""
@@ -370,7 +370,7 @@ concurrency_limit = 2
 [[agents]]
 name = "grok_cli"
 command = "grok"
-args = ["--always-approve", "-p", "{prompt}"]
+args = ["--always-approve", "--output-format", "streaming-json", "-p", "{prompt}"]
 models = []
 home = "/Users/vajra"
 workdir = ""
