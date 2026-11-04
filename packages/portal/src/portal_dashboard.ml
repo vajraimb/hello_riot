@@ -55,6 +55,12 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
 .work{flex:1;display:grid;grid-template-columns:320px minmax(0,1fr) 340px;min-height:0}
 .col{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
 .col:last-child{border-right:0}
+.work.rail-off{grid-template-columns:320px minmax(0,1fr)}
+.work.rail-off > .col.rail{display:none}
+.railbtn{background:none;border:1px solid var(--line2);border-radius:5px;color:var(--muted);cursor:pointer;padding:2px 8px;font-size:12px}
+.railbtn:hover{color:var(--text);border-color:var(--accent)}
+.railbtn.on{color:var(--text);background:var(--line)}
+#h-alerts{cursor:pointer}
 .colhead{flex:none;display:flex;align-items:center;gap:8px;height:38px;padding:0 14px;border-bottom:1px solid var(--line);font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);font-weight:600}
 .colhead .r{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400}
 .scroll{flex:1;overflow-y:auto;min-height:0}
@@ -194,6 +200,7 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
     <span id="h-today">API 今日 <b>–</b> 次</span>
     <span id="h-alerts"></span>
     <span id="h-ws"><span class="dot"></span>连接中</span>
+    <button class="railbtn" id="rail-toggle" title="显示 / 隐藏右栏（快捷键 \）">侧栏</button>
   </div>
 </header>
 
@@ -222,7 +229,7 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
       <button class="run" id="run">运行<kbd style="color:#dbe4ff;border-color:rgba(255,255,255,.3)">⌘↵</kbd></button>
     </div>
   </div>
-  <div class="work">
+  <div class="work" id="work">
     <div class="col">
       <div class="colhead">任务
         <div class="r filters" id="filters">
@@ -234,10 +241,10 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
       <div class="scroll" id="tasks"><div class="empty">还没有任务</div></div>
     </div>
     <div class="col" id="detail">
-      <div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务</span></div>
+      <div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>\</kbd> 侧栏</span></div>
     </div>
-    <div class="col">
-      <div class="colhead">需要你处理 <span class="r" id="alerts-count"></span></div>
+    <div class="col rail">
+      <div class="colhead">需要你处理 <span class="r" id="alerts-count"></span><button class="railbtn" id="rail-hide" title="隐藏右栏（\）" style="margin-left:8px">收起 ›</button></div>
       <div id="alerts" style="flex:none;max-height:55%;overflow-y:auto;padding-bottom:10px"></div>
       <div class="colhead" style="border-top:1px solid var(--line)">资源 <span class="r dim">延迟 · 次数</span></div>
       <div class="scroll"><table class="res" id="resources"></table></div>
@@ -629,12 +636,24 @@ setInterval(() => {
   if (S.tasks.some(t => t.status === 'running')) { renderList(); if (S.detail && S.detail.status === 'running') S.dirtyDetail = true; }
 }, 1000);
 
+/* ---------- right rail ---------- */
+function setRail(on) {
+  $('work').classList.toggle('rail-off', !on);
+  $('rail-toggle').classList.toggle('on', on);
+  localStorage.setItem('oasis_rail', on ? '1' : '0');
+}
+$('rail-toggle').onclick = () => setRail($('work').classList.contains('rail-off'));
+$('rail-hide').onclick = () => setRail(false);
+$('h-alerts').onclick = () => setRail(true);
+setRail(localStorage.getItem('oasis_rail') !== '0');
+
 /* ---------- keyboard ---------- */
 document.addEventListener('keydown', e => {
   const typing = ['TEXTAREA', 'INPUT', 'SELECT'].includes(document.activeElement.tagName);
   if (e.key === 'Escape' && typing) { document.activeElement.blur(); return; }
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === '/') { e.preventDefault(); promptEl.focus(); }
+  else if (e.key === '\\') { setRail($('work').classList.contains('rail-off')); }
   else if (e.key === 'j' || e.key === 'k') {
     const list = visibleTasks(); if (!list.length) return;
     const i = list.findIndex(t => t.id === S.sel);
