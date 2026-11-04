@@ -148,9 +148,13 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 ### 2.4 执行与容错
 
 - **非流式**：按回退链逐个尝试（blocking lane + 超时），全程记账/信号/决策记录
-- **流式（账户）**：导体 actor 管理当前 leg；上游断流/错误 → 触发 handoff（§3）
-- **流式（agent）**：子进程 stdout 逐行 → 文本提取（claude stream-json 解析，思考不外泄）→
-  客户端 delta；心跳保活（10s 空 chunk）；看门狗 SIGKILL 兜底
+- **流式（账户）**：导体 actor 管理当前 leg；上游断流/错误 → 触发 handoff（§3）。
+  正常结束 = `data: [DONE]`，或收到非空 `finish_reason` 后上游关闭（Perplexity 不发 `[DONE]`）；
+  两者都没有就关闭视为断流
+- **流式（agent）**：子进程 stdout 逐行 → 文本提取（claude / cursor-agent stream-json 只取 `assistant`
+  文本，末尾 `result` 是全文重复，丢弃；思考不外泄）→
+  客户端 delta；心跳保活（10s 空 chunk）；看门狗 SIGKILL 兜底（子进程经 perl `setpgrp` 成为进程组组长，
+  超时杀整个进程组——gemini 等 CLI 会 re-exec 出子 node 进程，只杀父进程会留下孤儿）
 - **异步任务**（MCP agent 任务默认）：秒回 task_id → `oasis_task_status` 轮询
   running/done/failed——解决"MCP 客户端超时 < agent 执行时长"的矛盾
 
@@ -204,6 +208,7 @@ spec 只约束**语义**：
                   # [0.3] quota_error_codes = ["1113"]（可选，provider 自定义配额错误码）
                   # [0.3] quota_reset = "daily"|"monthly"（停牌到次日 / 次月 1 日，默认 daily）
                   # [0.3] stream_usage = true（流式请求附 stream_options.include_usage）
+                  # connect_ip = "1.2.3.4"（可选，TCP 连接改连此 IP 绕过 DNS 污染；SNI/Host 仍用 base_url 域名）
 [[agents]]        # 见 2.2；enabled=false 的 agent 不进候选池
                   # [0.3] allowed_workdirs = ["/home/u/proj"] / env_passthrough = ["GH_TOKEN"]（见 §5）
 [[routes]]        # category -> 账户链

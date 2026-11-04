@@ -39,6 +39,7 @@ let mk_account = fun ~models ~budget name ->
     quota_error_codes = [];
     quota_reset = "daily";
     stream_usage = false;
+    connect_ip = "";
   }
 
 let bench_config =

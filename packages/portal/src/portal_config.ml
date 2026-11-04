@@ -20,6 +20,7 @@ type account = {
   quota_error_codes: string list;
   quota_reset: string;
   stream_usage: bool;
+  connect_ip: string;
 }
 
 type route = {
@@ -158,6 +159,9 @@ let parse_account = fun fields ->
           stream_usage =
             field fields "stream_usage" |> Option.and_then ~fn:get_bool_like
             |> Option.unwrap_or ~default:true;
+          connect_ip =
+            field fields "connect_ip" |> Option.and_then ~fn:Toml.get_string
+            |> Option.unwrap_or ~default:"";
         }
 
 let parse_kb_model = fun fields ->

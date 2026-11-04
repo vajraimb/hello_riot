@@ -481,6 +481,7 @@ max_fallback = 3
                     ~expected:(Some "TEST_KEY")
                     ~actual:a.Config.api_key_env;
                   Test.assert_equal ~expected:[ "m-a" ] ~actual:a.Config.models;
+                  Test.assert_equal ~expected:"" ~actual:a.Config.connect_ip;
                   (
                     match List.head cfg.Config.kb with
                     | None -> Error "no kb parsed"
@@ -536,6 +537,7 @@ let mk_account = fun ?(enabled = true) ?(budget = 0) ?(daily = 0) ?(models = [ "
     quota_error_codes = [];
     quota_reset = "daily";
     stream_usage = false;
+    connect_ip = "";
   }
 
 let zero_lookups =
@@ -758,6 +760,51 @@ let test_gateway_budget_blocks_all = fun _ctx ->
                     ~actual:(String.contains resp_body "budget_exhausted");
                   Ok ()
             )
+          )
+      )
+
+let test_gateway_connect_ip_overrides_dns = fun _ctx ->
+  match Mock.start () with
+  | Error e -> Error ("mock start: " ^ e)
+  | Ok mock ->
+      Mock.set_scenario mock { (Mock.default_scenario) with body = openai_ok_body ~content:"via-ip" };
+      let config =
+        mk_config
+          ~accounts:
+            [
+              {
+                (mk_account "acc_a") with
+                Config.base_url = "http://oasis-unresolvable.invalid:" ^ Int.to_string mock.pool.port;
+                connect_ip = "127.0.0.1";
+              };
+            ]
+          ~kb:[ mk_kb_model "m-a" ]
+          ~routes:[]
+          ~max_fallback:0
+      in
+      (
+        match Gateway.start ~config_path:None ~config ~port:0 () with
+        | Error e -> Error ("gateway start: " ^ e)
+        | Ok gw_pool -> (
+            let body =
+              Json.to_string
+                (Json.obj
+                  [
+                    ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "hi") ] ]);
+                  ])
+            in
+            match
+              gw_post
+                ~port:gw_pool.port
+                ~path:"/v1/chat/completions"
+                ~headers:[ ("Content-Type", "application/json") ]
+                ~body
+            with
+            | Error e -> Error e
+            | Ok (status, resp_body) ->
+                Test.assert_equal ~expected:200 ~actual:status;
+                Test.assert_equal ~expected:true ~actual:(String.contains resp_body "via-ip");
+                Ok ()
           )
       )
 
@@ -1582,8 +1629,22 @@ let test_agent_claude_stream_json_parse = fun _ctx ->
     ~expected:None
     ~actual:(Agent.extract_text ~command:"claude" "{\"type\":\"tool_use\",\"name\":\"bash\"}");
   Test.assert_equal
+    ~expected:None
+    ~actual:(Agent.extract_text ~command:"claude" "{\"type\":\"result\",\"result\":\"hi there\"}");
+  Test.assert_equal
     ~expected:(Some "plain line\n")
     ~actual:(Agent.extract_text ~command:"gemini" "plain line");
+  Ok ()
+
+let test_agent_cursor_stream_json_parse = fun _ctx ->
+  let assistant = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"PONG\"}]},\"session_id\":\"s\"}" in
+  Test.assert_equal ~expected:(Some "PONG") ~actual:(Agent.extract_text ~command:"cursor-agent" assistant);
+  Test.assert_equal
+    ~expected:None
+    ~actual:(Agent.extract_text ~command:"cursor-agent" "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"PONG\"}");
+  Test.assert_equal
+    ~expected:None
+    ~actual:(Agent.extract_text ~command:"cursor-agent" "{\"type\":\"tool_call\",\"subtype\":\"started\"}");
   Ok ()
 
 let test_agent_fit = fun _ctx ->
@@ -2279,6 +2340,40 @@ let test_h1_exact_replay = fun _ctx ->
           Test.assert_equal ~expected:3 ~actual:(h_field_int h "matched_bytes");
           Test.assert_equal ~expected:"acc_0" ~actual:(h_field_str h "from");
           Test.assert_equal ~expected:"acc_1" ~actual:(h_field_str h "to");
+          Ok ())
+    ()
+
+let test_stream_finish_reason_without_done = fun _ctx ->
+  handoff_case ~n:2
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0)
+        {
+          (Mock.default_scenario) with
+          sse =
+            [
+              "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"alpha \"}}]}";
+              "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"beta\"},\"finish_reason\":\"stop\"}]}";
+            ];
+          send_done = false;
+        };
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ "unused" ] })
+    ~check:(fun ~gw:_ ~mocks:_ ~events:_ ~deltas ~handoffs ->
+      Test.assert_equal ~expected:"alpha beta" ~actual:(String.concat "" deltas);
+      Test.assert_equal ~expected:0 ~actual:(List.length handoffs);
+      Ok ())
+    ()
+
+let test_stream_eof_without_finish_is_a_cut = fun _ctx ->
+  handoff_case ~n:2
+    ~setup:(fun mocks ->
+      Mock.set_scenario (nth_mock mocks 0) { (Mock.default_scenario) with sse = [ "ev1" ]; send_done = false };
+      Mock.set_scenario (nth_mock mocks 1) { (Mock.default_scenario) with sse = [ " ev2" ]; echo_prefix = Mock.Echo_exact })
+    ~check:(fun ~gw:_ ~mocks:_ ~events:_ ~deltas ~handoffs ->
+      Test.assert_equal ~expected:"ev1 ev2" ~actual:(String.concat "" deltas);
+      match expect_level handoffs "G1" with
+      | Error e -> Error e
+      | Ok h ->
+          Test.assert_equal ~expected:"upstream_stream_ended_early" ~actual:(h_field_str h "reason");
           Ok ())
     ()
 
@@ -3077,10 +3172,59 @@ let test_agent_env_whitelist = fun _ctx ->
       Test.assert_equal ~expected:true ~actual:(String.contains txt "KEY=unset");
       Test.assert_equal ~expected:true ~actual:(String.contains txt "PASS=passed-through");
       Test.assert_equal ~expected:true ~actual:(String.contains txt "PATHSET=yes");
-      Test.assert_equal ~expected:true ~actual:(String.contains txt "PWD=/tmp");
+      (* macOS: /tmp is a symlink to /private/tmp *)
+      Test.assert_equal
+        ~expected:true
+        ~actual:(String.contains txt "PWD=/tmp" || String.contains txt "PWD=/private/tmp");
       Ok ()
   | Error e -> Error ("collect failed: " ^ e)
   | exception Receive_timeout -> Error "collect timeout"
+
+let pid_alive = fun pid ->
+  let stdio = { Process.stdin = Process.Stdin.Null; stdout = Process.Stdout.Null; stderr = Process.Stderr.Null } in
+  match Process.spawn ~program:"/bin/kill" ~args:[| "-0"; pid |] ~stdio () with
+  | Error _ -> false
+  | Ok k ->
+      let rec wait () =
+        match Process.try_wait k with
+        | Ok (Some (Process.Exited c)) -> c = 0
+        | Ok (Some _) | Error _ -> false
+        | Ok None -> sleep (Time.Duration.from_millis 10); wait ()
+      in
+      let alive = wait () in
+      let _ = Process.close k in
+      alive
+
+let test_agent_timeout_kills_process_tree = fun _ctx ->
+  let cwd = Env.current_dir () |> Result.unwrap |> Path.to_string in
+  let script = cwd ^ "/packages/portal/tests/fixtures/agent_fork.sh" in
+  let pid_file = "/tmp/oasis-agent-fork.pid" in
+  let a = mk_agent ~args:[ script; pid_file ] ~timeout_s:1 "agent_fork" in
+  let me = self () in
+  let _ =
+    Runtime.spawn_blocked (fun () ->
+      let res = Agent.collect ~agent:a ~model:"" ~prompt:"" () in
+      send me (Agent_collect_done res);
+      Ok ())
+  in
+  let selector msg =
+    match msg with
+    | Agent_collect_done r -> Select r
+    | _ -> Skip
+  in
+  match receive ~selector ~timeout:(Time.Duration.from_secs 30) () with
+  | exception Receive_timeout -> Error "collect did not return after the watchdog fired"
+  | Ok _ -> Error "expected a timeout"
+  | Error _ -> (
+      match Fs.read_to_string (Path.from_string pid_file |> Result.unwrap) with
+      | Error _ -> Error "fixture did not record the child pid"
+      | Ok content ->
+          let _ = Fs.remove_file (Path.from_string pid_file |> Result.unwrap) in
+          let child = String.trim content in
+          sleep (Time.Duration.from_millis 200);
+          Test.assert_equal ~expected:false ~actual:(pid_alive child);
+          Ok ()
+    )
 
 let tests =
   Test.[
@@ -3123,6 +3267,11 @@ let tests =
     case ~size:Test.Large "gateway: cross-protocol seamless handoff" test_gateway_cross_protocol_seamless_handoff;
     case "agent: args template" test_agent_build_args;
     case "agent: claude stream-json parse" test_agent_claude_stream_json_parse;
+    case "agent: cursor stream-json parse" test_agent_cursor_stream_json_parse;
+    case ~size:Test.Large "agent: watchdog timeout kills the whole process tree" test_agent_timeout_kills_process_tree;
+    case "gateway: connect_ip overrides DNS" test_gateway_connect_ip_overrides_dns;
+    case "stream: finish_reason then EOF without [DONE] is a clean end" test_stream_finish_reason_without_done;
+    case "stream: EOF without finish_reason or [DONE] is a cut" test_stream_eof_without_finish_is_a_cut;
     case "agent: fit scoring" test_agent_fit;
     case ~size:Test.Large "gateway: agent routing + fallback" test_gateway_agent_non_stream_and_fallback;
     case ~size:Test.Large "gateway: agent streaming" test_gateway_agent_stream_and_explicit_chat;

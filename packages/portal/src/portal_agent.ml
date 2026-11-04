@@ -59,43 +59,35 @@ let build_args = fun (a : agent) ~model ~prompt ->
 
 (* ---------- output parsing ---------- *)
 
+(** Text blocks of a stream-json [assistant] line. *)
+let assistant_text = fun j ->
+  match Json.get_field "message" j with
+  | None -> None
+  | Some message -> (
+      match Json.get_field "content" message |> Option.and_then ~fn:Json.get_array with
+      | None -> None
+      | Some blocks ->
+          let texts =
+            List.filter_map blocks ~fn:(fun block ->
+              match Json.get_field "type" block |> Option.and_then ~fn:Json.get_string with
+              | Some "text" -> Json.get_field "text" block |> Option.and_then ~fn:Json.get_string
+              | _ -> None)
+          in
+          if List.is_empty texts then None else Some (String.concat "" texts)
+    )
+
 (** [extract_text ~command line] pulls the visible assistant text from one
-    line of agent stdout. Claude Code's stream-json lines are parsed; other
-    agents are treated as plain text. Returns None for lines that carry no
-    user-visible text (tool events, json bookkeeping). *)
+    line of agent stdout. Claude Code's and Cursor's stream-json lines are
+    parsed; other agents are treated as plain text. Returns None for lines
+    that carry no user-visible text (tool events, json bookkeeping). *)
 let extract_text = fun ~command (line : string) ->
-  if String.equal command "claude" then (
+  if String.equal command "claude" || String.equal command "cursor-agent" then (
+    (* the final [result] line repeats every assistant segment *)
     match Json.from_string line with
     | Error _ -> None
     | Ok j -> (
         match Json.get_field "type" j |> Option.and_then ~fn:Json.get_string with
-        | Some "assistant" -> (
-            match Json.get_field "message" j with
-            | None -> None
-            | Some message -> (
-                match
-                  Json.get_field "content" message |> Option.and_then ~fn:Json.get_array
-                with
-                | None -> None
-                | Some blocks ->
-                    let texts =
-                      List.filter_map blocks ~fn:(fun block ->
-                        match
-                          Json.get_field "type" block
-                          |> Option.and_then ~fn:Json.get_string
-                        with
-                        | Some "text" ->
-                            Json.get_field "text" block
-                            |> Option.and_then ~fn:Json.get_string
-                        | _ -> None)
-                    in
-                    if List.is_empty texts then None
-                    else Some (String.concat "" texts)
-              )
-          )
-        | Some "result" ->
-            (* final result line: prefer the result text *)
-            Json.get_field "result" j |> Option.and_then ~fn:Json.get_string
+        | Some "assistant" -> assistant_text j
         | _ -> None
       )
   ) else
@@ -180,18 +172,41 @@ let spawn_proc = fun ~(agent : agent) ~args () ->
     else Some (Path.from_string agent.workdir |> Result.unwrap)
   in
   let env_args = List.map (child_env agent) ~fn:(fun (k, v) -> k ^ "=" ^ v) in
-  let argv = ("-i" :: env_args) @ (agent.command :: Array.to_list args) in
+  (* perl makes the agent a process-group leader so the watchdog can kill
+     the whole tree: CLIs such as gemini re-exec into a child node process
+     that outlives a SIGKILL of the parent *)
+  let group_leader = [ "/usr/bin/perl"; "-e"; "setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127"; "--" ] in
+  let argv = ("-i" :: env_args) @ group_leader @ (agent.command :: Array.to_list args) in
   let args = Array.init ~count:(List.length argv) ~fn:(fun i -> List.get_unchecked argv ~at:i) in
   Process.spawn ~program:"env" ~args ?current_dir:workdir ~stdio ()
 
+(** SIGKILL the process group led by [proc] (see [spawn_proc]). *)
+let kill_group = fun (proc : Process.t) ->
+  let stdio = { Process.stdin = Process.Stdin.Null; stdout = Process.Stdout.Null; stderr = Process.Stderr.Null } in
+  (match
+     Process.spawn ~program:"/bin/kill" ~args:[| "-9"; "--"; "-" ^ Int.to_string (Process.pid proc) |] ~stdio ()
+   with
+   | Error _ -> ()
+   | Ok k ->
+       let rec reap n =
+         match Process.try_wait k with
+         | Ok (Some _) | Error _ -> ()
+         | Ok None -> if n > 0 then (sleep (Time.Duration.from_millis 10); reap (n - 1))
+       in
+       reap 100;
+       let _ = Process.close k in
+       ());
+  let _ = Process.kill proc ~signal:9 in
+  ()
+
 let watchdog = fun ~(proc : Process.t) ~timeout_s ~to_pid ~leg ->
-  (* SIGKILL the subprocess after [timeout_s]; runs on its own blocking lane *)
+  (* SIGKILL the subprocess tree after [timeout_s]; runs on its own blocking lane *)
   Runtime.spawn_blocked (fun () ->
     sleep (Time.Duration.from_secs (max 1 timeout_s));
     (match Process.try_wait proc with
      | Ok (Some (Process.Exited _ | Process.Signaled _)) -> ()
      | _ ->
-         let _ = Process.kill proc ~signal:9 in
+         kill_group proc;
          send to_pid (Agent_timeout leg));
     Ok ())
 

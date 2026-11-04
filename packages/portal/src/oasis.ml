@@ -523,6 +523,7 @@ let run_self_test = fun () ->
                 quota_error_codes = [];
                 quota_reset = "daily";
                 stream_usage = false;
+                connect_ip = "";
               }
             in
             let config =

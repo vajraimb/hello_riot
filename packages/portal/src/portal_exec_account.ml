@@ -109,12 +109,14 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
               in
               let call_result =
                 blocking_call
+                  ~connect_ip:account.Portal_config.connect_ip
                   ~scheme
                   ~host
                   ~port
                   ~path:chat_path
                   ~headers
                   ~body:req_body
+                  ()
               in
               (
                 match call_result with

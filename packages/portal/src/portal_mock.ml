@@ -25,10 +25,19 @@ type scenario = {
   cut_after_bytes: int;
   delay_ms: int;
   echo_prefix: echo;
+  send_done: bool;
 }
 
 let default_scenario =
-  { status = 200; body = "{}"; sse = []; cut_after_bytes = 0; delay_ms = 0; echo_prefix = No_echo }
+  {
+    status = 200;
+    body = "{}";
+    sse = [];
+    cut_after_bytes = 0;
+    delay_ms = 0;
+    echo_prefix = No_echo;
+    send_done = true;
+  }
 
 type t = {
   pool: Atacama.pool;
@@ -226,8 +235,11 @@ let start = fun ?(host = "127.0.0.1") ?(port = 0) () ->
               | Ok _ ->
                   let rec emit = function
                     | [] -> (
-                        (* normal stream termination, OpenAI-style *)
-                        match write_counted (chunked_frame "data: [DONE]\n\n") with
+                        (* normal stream termination, OpenAI-style;
+                           [send_done = false] ends like Perplexity: EOF
+                           right after the last event *)
+                        let done_frame = if sc.send_done then chunked_frame "data: [DONE]\n\n" else "" in
+                        match write_counted done_frame with
                         | Error e -> Error e
                         | Ok `Cut -> Ok ()
                         | Ok `More -> (

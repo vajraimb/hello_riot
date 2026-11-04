@@ -190,5 +190,10 @@ let scan = fun ~home ->
       (file_exists (home ^ "/.codex/auth.json"))
       (None, []);
     mk "kimi_cli" "kimi" (find_command ~home "kimi") (dir_exists (home ^ "/.kimi")) (None, []);
-    mk "cursor" "cursor" (find_command ~home "cursor") false (None, []);
+    mk "grok_cli" "grok" (find_command ~home "grok" || file_exists (home ^ "/.grok/bin/grok"))
+      (dir_exists (home ^ "/.grok"))
+      (None, []);
+    mk "cursor_agent" "cursor-agent" (find_command ~home "cursor-agent")
+      (file_exists (home ^ "/.cursor/cli-config.json"))
+      (None, []);
   ]

@@ -59,8 +59,11 @@ let chat_path_of = fun ~protocol path_prefix ->
     (* OpenAI-style root -> /chat/completions *)
     prefix ^ "/chat/completions"
 
-let connect_upstream = fun ~scheme ~host ~port ->
-  let addr = Net.Addr.from_host_and_port ~host ~port in
+(** [connect_ip] (an account's [connect_ip], "" = resolve [host]) replaces
+    DNS for the TCP connect only; TLS SNI and the Host header keep [host]. *)
+let connect_upstream = fun ?(connect_ip = "") ~scheme ~host ~port () ->
+  let dial_host = if String.is_empty connect_ip then host else connect_ip in
+  let addr = Net.Addr.from_host_and_port ~host:dial_host ~port in
   match addr with
   | Error _ -> Error ("bad upstream address: " ^ host ^ ":" ^ Int.to_string port)
   | Ok addr -> (
@@ -75,8 +78,8 @@ let connect_upstream = fun ~scheme ~host ~port ->
       | Ok conn -> Ok conn
     )
 
-let upstream_call = fun ~scheme ~host ~port ~path ~headers ~body ->
-  match connect_upstream ~scheme ~host ~port with
+let upstream_call = fun ?connect_ip ~scheme ~host ~port ~path ~headers ~body () ->
+  match connect_upstream ?connect_ip ~scheme ~host ~port () with
   | Error e -> Error e
   | Ok conn ->
       let req =
@@ -98,11 +101,11 @@ let upstream_call = fun ~scheme ~host ~port ~path ~headers ~body ->
       )
 
 (** Run an outbound request on a dedicated blocking lane; wait up to 60s. *)
-let blocking_call = fun ~scheme ~host ~port ~path ~headers ~body ->
+let blocking_call = fun ?connect_ip ~scheme ~host ~port ~path ~headers ~body () ->
   let reply_to = self () in
   let _ =
     Runtime.spawn_blocked (fun () ->
-      let res = upstream_call ~scheme ~host ~port ~path ~headers ~body in
+      let res = upstream_call ?connect_ip ~scheme ~host ~port ~path ~headers ~body () in
       send reply_to (Upstream_result res);
       Ok ())
   in
@@ -116,8 +119,8 @@ let blocking_call = fun ~scheme ~host ~port ~path ~headers ~body ->
 
 (** Outbound streaming request on a blocking lane: body chunks and failures
     are reported to [to_pid] as messages. *)
-let stream_upstream = fun ~leg_id ~scheme ~host ~port ~path ~headers ~body ~to_pid ->
-  match connect_upstream ~scheme ~host ~port with
+let stream_upstream = fun ?connect_ip ~leg_id ~scheme ~host ~port ~path ~headers ~body ~to_pid () ->
+  match connect_upstream ?connect_ip ~scheme ~host ~port () with
   | Error e ->
       send to_pid (Upstream_failed (leg_id, e));
       send to_pid (Upstream_ended leg_id);
@@ -252,6 +255,25 @@ let extract_delta_content = fun (data : string) ->
                only ever see the answer (non-stream responses still get the
                reasoning fallback via normalize_openai_response) *)
             ""
+    )
+
+(** True for an OpenAI stream event whose first choice has a non-null
+    [finish_reason]. Some upstreams (Perplexity) end the stream with such an
+    event and close without [data: [DONE]]. *)
+let has_finish_reason = fun (data : string) ->
+  match Json.from_string data with
+  | Error _ -> false
+  | Ok j -> (
+      match
+        Json.get_field "choices" j
+        |> Option.and_then ~fn:Json.get_array
+        |> Option.and_then ~fn:List.head
+      with
+      | None -> false
+      | Some choice ->
+          Json.get_field "finish_reason" choice
+          |> Option.and_then ~fn:Json.get_string
+          |> Option.is_some
     )
 
 (** True for an OpenAI stream event that carries tool-call deltas or ends a

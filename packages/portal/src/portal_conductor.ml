@@ -49,6 +49,7 @@ type conductor_state = {
   mutable leg_start: Time.Instant.t;
   mutable leg_id: int;
   mutable awaiting_leg_end: bool;
+  mutable saw_finish_reason: bool;
   mutable tool_calls_sent: bool;
   mutable finished: bool;
 }
@@ -100,6 +101,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       leg_start = Time.Instant.now ();
       leg_id = 0;
       awaiting_leg_end = false;
+      saw_finish_reason = false;
       tool_calls_sent = false;
       finished = false;
     }
@@ -364,6 +366,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
                 Runtime.spawn_blocked (fun () ->
                   let res =
                     stream_upstream
+                      ~connect_ip:account.Portal_config.connect_ip
                       ~leg_id:this_leg
                       ~scheme
                       ~host
@@ -372,6 +375,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
                       ~headers:(upstream_headers account host)
                       ~body
                       ~to_pid:me
+                      ()
                   in
                   (
                     match res with
@@ -473,6 +477,8 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
               let (u_in, u_out) = stream_usage_of ~anthropic ev.Portal_sse.data in
               if Option.is_some u_in then cs.usage_in <- u_in;
               if Option.is_some u_out then cs.usage_out <- u_out;
+              if (not anthropic) && has_finish_reason ev.Portal_sse.data then
+                cs.saw_finish_reason <- true;
               if (not anthropic) && is_tool_call_event ev.Portal_sse.data then
                 relay_tool_event ev.Portal_sse.data
               else
@@ -526,6 +532,7 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       cs.handoff <- None;
       cs.sse_state <- Portal_sse.init;
       cs.awaiting_leg_end <- false;
+      cs.saw_finish_reason <- false;
       let delivered = not (String.is_empty cs.sent_text) in
       if cs.tool_calls_sent then
         (* a half-streamed tool call cannot be spliced or restarted without
@@ -571,7 +578,10 @@ let run_conductor = fun (cc : conductor_ctx) ~(candidates : string list) ~(paren
       | `Leg_end ->
           if cs.awaiting_leg_end then
             finish_ok ()
-          else (
+          else if cs.saw_finish_reason then (
+            flush_handoff ();
+            finish_ok ()
+          ) else (
             (* the upstream closed without a done event: treat as a cut *)
             handle_failure ~err:"upstream_stream_ended_early" ~status:None ~body:"";
             loop ()
