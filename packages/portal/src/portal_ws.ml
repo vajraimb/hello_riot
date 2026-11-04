@@ -21,8 +21,53 @@ let broadcast_json = fun (state : state) (payload : Json.t) ->
     let _ = ConcurrentHashMap.remove state.ws_clients ~key:conn_id in
     ())
 
+(** Keeps the conversation store in step with the task feed. *)
+let track_thread = fun (state : state) ~type_ ~request_id (data : Json.t) ->
+  let thread_of_task () =
+    match Portal_feed.find state.feed request_id with
+    | Some t when not (String.is_empty t.Portal_feed.thread) -> Some t
+    | _ -> None
+  in
+  let str k = Json.get_field k data |> Option.and_then ~fn:Json.get_string |> Option.unwrap_or ~default:"" in
+  let save () = Portal_thread.save state.threads ~path:(threads_file state) in
+  match type_ with
+  | "task_started" when not (String.is_empty (str "thread")) ->
+      Portal_thread.ensure state.threads ~id:(str "thread") ~title:(str "title")
+  | "task_done" -> (
+      match thread_of_task () with
+      | None -> ()
+      | Some t ->
+          Portal_thread.append_turn state.threads ~id:t.Portal_feed.thread
+            {
+              Portal_thread.request_id;
+              prompt = t.Portal_feed.prompt;
+              answer = t.Portal_feed.answer;
+              executor = t.Portal_feed.executor;
+              mode = t.Portal_feed.mode;
+              status = t.Portal_feed.status;
+              finished_ms = t.Portal_feed.finished_ms;
+            };
+          save ())
+  | "agent_session" -> (
+      match thread_of_task () with
+      | Some t when not (String.is_empty (str "session")) ->
+          Portal_thread.set_session state.threads ~id:t.Portal_feed.thread ~agent:(str "agent") ~session:(str "session");
+          save ()
+      | _ -> ())
+  | "committee_started" -> (
+      match thread_of_task () with
+      | Some t ->
+          let members =
+            Json.get_field "members" data |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
+            |> List.filter_map ~fn:Json.get_string
+          in
+          Portal_thread.set_members state.threads ~id:t.Portal_feed.thread ~members
+      | None -> ())
+  | _ -> ()
+
 let broadcast_event = fun (state : state) ~(type_ : string) ~(request_id : string) ~(data : Json.t) ->
   Portal_feed.apply state.feed ~type_ ~request_id data;
+  track_thread state ~type_ ~request_id data;
   if String.equal type_ "task_done" then
     Portal_signals.save_latency state.signals ~path:(data_path state "latency.json");
   broadcast_json
@@ -35,7 +80,7 @@ let broadcast_event = fun (state : state) ~(type_ : string) ~(request_id : strin
         ("data", data);
       ])
 
-let emit_routed = fun ?(pinned = false) (state : state) ~(request_id : string) ~(mode : string) (d : Portal_router.decision) ->
+let emit_routed = fun ?(pinned = false) ?(continued = false) (state : state) ~(request_id : string) ~(mode : string) (d : Portal_router.decision) ->
   broadcast_event
     state
     ~type_:"routed"
@@ -46,6 +91,7 @@ let emit_routed = fun ?(pinned = false) (state : state) ~(request_id : string) ~
           ("mode", Json.string mode);
           ("explored", Json.bool d.Portal_router.explored);
           ("pinned", Json.bool pinned);
+          ("continued", Json.bool continued);
           ("chosen", d.Portal_router.chosen |> Option.map ~fn:Json.string |> Option.unwrap_or ~default:Json.null);
           (
             "candidates",

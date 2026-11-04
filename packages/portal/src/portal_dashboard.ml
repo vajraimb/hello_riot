@@ -128,6 +128,27 @@ body.resizing{cursor:col-resize;user-select:none}
 .dtab{background:none;border:0;padding:7px 10px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent}
 .dtab.on{color:var(--text);border-bottom-color:var(--accent)}
 
+/* conversation */
+#detail .dbody{flex:1;display:flex;flex-direction:column;min-height:0}
+.follow{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 14px;display:none;gap:10px;align-items:flex-end}
+.follow.on{display:flex}
+.follow textarea{flex:1;min-height:40px;max-height:200px;resize:vertical;background:var(--bg);border:1px solid var(--line2);border-radius:6px;padding:8px 10px;outline:none;line-height:1.45}
+.follow textarea:focus{border-color:var(--accent)}
+.follow .fh{font-size:11.5px;color:var(--dim);margin-bottom:5px}
+.follow .fw{flex:1;display:flex;flex-direction:column;min-width:0}
+.turns{display:flex;flex-wrap:wrap;gap:4px;margin-top:9px;align-items:center;font-size:11.5px;color:var(--dim)}
+.turns button{background:none;border:1px solid var(--line);border-radius:4px;color:var(--muted);padding:0 7px;line-height:19px;cursor:pointer;font-size:11.5px;font-family:var(--mono)}
+.turns button.on{border-color:var(--accent);color:var(--text);background:rgba(88,166,255,.12)}
+.turns button.failed{border-color:rgba(248,81,73,.5)}
+.turns button.running{border-color:rgba(91,140,255,.6)}
+.nturn{font-size:10.5px;color:var(--accent2);border:1px solid rgba(91,140,255,.35);border-radius:3px;padding:0 4px;line-height:16px}
+.turnblk{border-bottom:1px solid var(--line);padding:14px 20px}
+.turnblk .meta{font-size:12px;color:var(--muted);display:flex;gap:10px;align-items:center}
+.turnblk .q{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;padding:8px 11px;white-space:pre-wrap;word-break:break-word;margin:8px 0 10px;font-size:13px}
+.turnblk .a{white-space:pre-wrap;word-break:break-word;line-height:1.65;font-size:13.5px}
+.turnblk .a pre{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;line-height:1.5}
+.turnblk .a code{font-family:var(--mono);font-size:12px;background:var(--panel2);padding:0 4px;border-radius:3px}
+
 /* timeline */
 .tl{padding:10px 18px 30px}
 .ev{display:grid;grid-template-columns:62px 18px 1fr;gap:0 8px;padding:4px 0;align-items:start}
@@ -271,7 +292,12 @@ body.resizing{cursor:col-resize;user-select:none}
       <div class="scroll" id="tasks"><div class="empty">还没有任务</div></div>
     </div>
     <div class="col" id="detail">
-      <div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>[</kbd> 任务栏 · <kbd>\</kbd> 侧栏</span></div>
+      <div class="dbody" id="dbody"><div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>[</kbd> 任务栏 · <kbd>\</kbd> 侧栏</span></div></div>
+      <div class="follow" id="followbar">
+        <div class="fw"><div class="fh" id="follow-hint"></div>
+          <textarea id="follow-in" rows="2" placeholder="继续这个对话：追问、补充要求，或让它接着把任务做完（⌘↵ 发送）"></textarea></div>
+        <button class="run" id="follow-go">继续<kbd style="color:#dbe4ff;border-color:rgba(255,255,255,.3)">⌘↵</kbd></button>
+      </div>
     </div>
     <div class="col rail">
       <div class="colhead">需要你处理 <span class="r" id="alerts-count"></span><button class="railbtn" id="rail-hide" title="隐藏右栏（\）" style="margin-left:8px">收起 ›</button></div>
@@ -356,7 +382,8 @@ document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
 
 /* ---------- state ---------- */
 const S = { tasks: [], sel: null, detail: null, filter: 'all', dirtyList: true, dirtyDetail: false,
-            localAnswers: {}, refs: {}, pendingRef: null, detailTab: 'trace', openTools: new Set(), openText: new Set() };
+            localAnswers: {}, refs: {}, pendingRef: null, detailTab: 'trace', openTools: new Set(), openText: new Set(),
+            threads: [], selKey: null, selThread: null, thread: null };
 
 /* ---------- command bar ---------- */
 let mode = '';
@@ -415,15 +442,7 @@ async function run() {
   if (cat === 'pick' && !pick) { toast('没有可选的 agent'); return; }
   if (cat === 'committee' && committee.length < 2) { toast('委员会至少选 2 个账户'); $('cm-pop') && $('cm-pop').classList.add('on'); return; }
   const stream = cat !== 'committee';
-  const ref = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  S.pendingRef = ref;
-  S.localAnswers[ref] = '';
-  const headers = {
-    'Content-Type': 'application/json',
-    'X-Oasis-Goal': $('goal').value,
-    'X-Oasis-Source': 'dashboard',
-    'X-Oasis-Client-Ref': ref
-  };
+  const headers = {};
   if (mode) headers['X-Oasis-Mode'] = mode;
   if (cat === 'pick') { headers['X-Oasis-Mode'] = 'agent'; headers['X-Oasis-Agent'] = pick; }
   else if (cat === 'committee') headers['X-Oasis-Committee'] = committee.join(',');
@@ -431,6 +450,31 @@ async function run() {
   $('run').disabled = true;
   setTimeout(() => { $('run').disabled = false; }, 600);
   promptEl.value = ''; promptEl.style.height = 'auto';
+  await send(text, headers, stream);
+}
+function threadRow(id) { return rowsAll().find(r => r.thread === id); }
+async function followUp() {
+  const box = $('follow-in');
+  const text = box.value.trim();
+  const id = S.selThread;
+  if (!text || !id) { box.focus(); return; }
+  const row = threadRow(id);
+  if (row && row.status === 'running') { toast('上一轮还在进行，完成或停止后再继续'); return; }
+  box.value = '';
+  await send(text, { 'X-Oasis-Thread': id }, !(row && row.mode === 'committee'));
+}
+$('follow-go').onclick = followUp;
+$('follow-in').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); followUp(); } });
+async function send(text, extra, stream) {
+  const ref = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  S.pendingRef = ref;
+  S.localAnswers[ref] = '';
+  const headers = Object.assign({
+    'Content-Type': 'application/json',
+    'X-Oasis-Goal': $('goal').value,
+    'X-Oasis-Source': 'dashboard',
+    'X-Oasis-Client-Ref': ref
+  }, extra);
   try {
     const res = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: null, messages: [{ role: 'user', content: text }], stream }) });
     if (!res.ok || !res.body) {
@@ -473,37 +517,79 @@ document.querySelectorAll('#filters button').forEach(b => b.onclick = () => {
 });
 async function loadList() {
   try {
-    const j = await (await fetch('/api/feed?limit=150')).json();
+    const [j, th] = await Promise.all([fetch('/api/feed?limit=150').then(r => r.json()), fetch('/api/threads?limit=80').then(r => r.json())]);
     S.tasks = j.tasks || [];
+    S.threads = th.threads || [];
     renderList();
   } catch (e) {}
+}
+/* one row per conversation: live turns from the feed, older conversations from the thread store */
+function rowsAll() {
+  const by = new Map();
+  S.tasks.forEach(t => { const k = t.thread || t.id; if (!by.has(k)) by.set(k, []); by.get(k).push(t); });
+  const store = new Map(S.threads.map(t => [t.id, t]));
+  const rows = [];
+  by.forEach((ts, k) => {
+    ts.sort((a, b) => (a.turn || 0) - (b.turn || 0) || a.started_ms - b.started_ms);
+    const last = ts[ts.length - 1], th = store.get(k);
+    rows.push({ key: k, thread: last.thread || '', last, tasks: ts, title: (th && th.title) || ts[0].title, n: Math.max(ts.length, last.turn || 0, th ? th.turns : 0),
+      status: last.status, mode: last.mode, executor: last.executor, at: last.started_ms, dur: last.duration_ms, source: last.source });
+  });
+  S.threads.forEach(th => { if (!by.has(th.id)) rows.push({ key: th.id, thread: th.id, last: null, tasks: [], title: th.title, n: th.turns,
+    status: th.status, mode: th.mode, executor: th.executor, at: th.updated_ms, dur: null, source: '', hist: true }); });
+  rows.sort((a, b) => b.at - a.at);
+  return rows;
 }
 function statusGlyph(st) {
   if (st === 'running') return '<span class="spin"></span>';
   return st === 'ok' ? '✓' : st === 'cancelled' ? '■' : '✗';
 }
 function visibleTasks() {
-  return S.tasks.filter(t => S.filter === 'all' || t.status === S.filter);
+  return rowsAll().filter(r => S.filter === 'all' || r.status === S.filter);
 }
 function renderList() {
   const box = $('tasks');
   const list = visibleTasks();
-  if (!list.length) { box.innerHTML = '<div class="empty">' + (S.tasks.length ? '没有符合条件的任务' : '还没有任务<br><span style="font-size:12px">从上方输入，或通过 API / MCP 调用网关</span>') + '</div>'; return; }
-  box.innerHTML = list.map(t => {
-    const m = t.mode === 'agent' ? '<span class="tag agent">Agent</span>' : (t.mode ? '<span class="tag chat">问答</span>' : '');
-    return '<div class="task' + (t.id === S.sel ? ' sel' : '') + '" data-id="' + esc(t.id) + '">' +
-      '<div class="st ' + t.status + '">' + statusGlyph(t.status) + '</div>' +
-      '<div class="t">' + (esc(t.title) || '<span class="dim">（无标题）</span>') + '</div>' +
-      '<div class="m">' + m + '<span>' + esc(t.executor || (t.status === 'running' ? '路由中' : '无执行者')) + '</span><span>' + fmtDur(t.duration_ms) + '</span>' +
-      '<span>' + esc(SRC[t.source] || t.source) + '</span><span style="margin-left:auto">' + ago(t.started_ms) + '</span></div></div>';
+  if (!list.length) { box.innerHTML = '<div class="empty">' + (S.tasks.length || S.threads.length ? '没有符合条件的任务' : '还没有任务<br><span style="font-size:12px">从上方输入，或通过 API / MCP 调用网关</span>') + '</div>'; return; }
+  box.innerHTML = list.map(r => {
+    const m = r.mode === 'agent' ? '<span class="tag agent">Agent</span>' : r.mode === 'committee' ? '<span class="tag chat">委员会</span>' : (r.mode ? '<span class="tag chat">问答</span>' : '');
+    return '<div class="task' + (r.key === S.selKey ? ' sel' : '') + '" data-k="' + esc(r.key) + '">' +
+      '<div class="st ' + r.status + '">' + statusGlyph(r.status) + '</div>' +
+      '<div class="t">' + (esc(r.title) || '<span class="dim">（无标题）</span>') + '</div>' +
+      '<div class="m">' + m + (r.n > 1 ? '<span class="nturn">' + r.n + ' 轮</span>' : '') + '<span>' + esc(r.executor || (r.status === 'running' ? '路由中' : '无执行者')) + '</span><span>' + fmtDur(r.dur) + '</span>' +
+      '<span>' + (r.hist ? '历史' : esc(SRC[r.source] || r.source)) + '</span><span style="margin-left:auto">' + ago(r.at) + '</span></div></div>';
   }).join('');
-  box.querySelectorAll('.task').forEach(el => el.onclick = () => select(el.dataset.id));
+  box.querySelectorAll('.task').forEach(el => el.onclick = () => select(el.dataset.k));
+  syncFollow();
 }
-function select(id) {
-  if (S.sel !== id) { S.openTools.clear(); S.openText.clear(); }
-  S.sel = id;
+function select(key) {
+  const r = rowsAll().find(x => x.key === key);
+  if (!r) return;
+  if (S.selKey !== key) { S.openTools.clear(); S.openText.clear(); S.thread = null; }
+  S.selKey = key;
+  S.selThread = r.thread || null;
+  S.sel = r.last ? r.last.id : null;
+  S.detail = null;
+  if (!r.last) S.detailTab = 'conv';
+  else if (S.detailTab === 'conv' && r.n < 2) S.detailTab = 'trace';
   renderList();
+  loadThread();
+  if (S.sel) loadDetail(true); else renderDetail(true);
+}
+function selectTurn(id) {
+  if (S.sel === id) return;
+  S.openTools.clear(); S.openText.clear();
+  S.sel = id;
+  if (S.detailTab === 'conv') S.detailTab = 'trace';
   loadDetail(true);
+}
+async function loadThread() {
+  if (!S.selThread) { S.thread = null; return; }
+  try {
+    const r = await fetch('/api/thread?id=' + encodeURIComponent(S.selThread));
+    S.thread = r.ok ? await r.json() : null;
+    if (S.detailTab === 'conv' || !S.detail) renderDetail(false); else syncFollow();
+  } catch (e) {}
 }
 
 /* ---------- detail ---------- */
@@ -525,7 +611,7 @@ async function rate(id, rating) {
   } catch (e) { toast('评价失败'); }
 }
 async function loadDetail(scrollEnd) {
-  if (!S.sel) return;
+  if (!S.sel) { renderDetail(scrollEnd); return; }
   try {
     const r = await fetch('/api/feed/task?id=' + encodeURIComponent(S.sel));
     if (!r.ok) return;
@@ -551,14 +637,64 @@ function scoreTable(route) {
 }
 const REASON = { unknown_account: '未在配置中', disabled: '已停用', model_not_served: '不提供所需模型', context_too_small: '上下文不够', budget_exhausted: '预算用完', daily_limit_reached: '今日次数用完', quota_parked: '额度暂停中', circuit_open: '熔断中', rpm_exhausted: '每分钟限额满', concurrency_limit: '并发已满' };
 
+const ST = { running: '进行中', ok: '完成', failed: '失败', cancelled: '已停止' };
+function syncFollow() {
+  const id = S.selThread;
+  $('followbar').classList.toggle('on', !!id);
+  if (!id) return;
+  const row = threadRow(id);
+  const running = !!(row && row.status === 'running');
+  $('follow-go').disabled = running;
+  const who = row && row.executor ? row.executor : '';
+  $('follow-hint').textContent = running ? '这一轮还在进行——完成或停止后可以继续' :
+    row && row.mode === 'agent' ? '继续交给 agent ' + who + '：续接它自己的会话，它记得之前做过什么' :
+    row && row.mode === 'committee' ? '继续由同一组委员会成员作答，带上前面的对话' :
+    '继续对话：带上前面 ' + (row ? row.n : '') + ' 轮内容' + (who ? '，优先由 ' + who + ' 回答' : '');
+}
+function mdHtml(text) {
+  const parts = String(text).split(/```[^\n]*\n?/);
+  return parts.map((p, i) => i % 2 ? '<pre>' + esc(p) + '</pre>' : esc(p).replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')).join('');
+}
+function renderConversation(d) {
+  const turns = S.thread ? S.thread.turns.map(x => Object.assign({}, x)) : [];
+  const row = S.selThread ? threadRow(S.selThread) : null;
+  (row ? row.tasks : []).forEach(t => {
+    const hit = turns.find(x => x.request_id === t.id);
+    if (hit) hit.inFeed = true;
+    else turns.push({ request_id: t.id, prompt: (d && d.id === t.id) ? d.prompt : t.title, answer: '', executor: t.executor, status: t.status, live: true, inFeed: true });
+  });
+  if (!turns.length) return '<div class="empty">加载对话…</div>';
+  return turns.map((x, i) => {
+    let answer = x.answer;
+    if (x.live) { const ref = S.refs[x.request_id]; answer = (ref && S.localAnswers[ref]) || (d && d.id === x.request_id ? d.answer : ''); }
+    return '<div class="turnblk"><div class="meta"><b style="color:var(--text)">第 ' + (i + 1) + ' 轮</b><span class="pill ' + x.status + '">' + (ST[x.status] || x.status) + '</span>' +
+      '<span class="mono">' + esc(x.executor || '–') + '</span>' +
+      (x.inFeed ? '<span class="more" style="margin-left:auto" onclick="selectTurn(\'' + esc(x.request_id) + '\')">查看执行过程</span>' : '') + '</div>' +
+      '<div class="q">' + esc(x.prompt || '') + '</div>' +
+      '<div class="a">' + (answer ? mdHtml(answer) : '<span class="dim">' + (x.status === 'running' ? '进行中…' : '没有输出') + '</span>') + '</div></div>';
+  }).join('');
+}
 function renderDetail(scrollEnd) {
   const d = S.detail;
-  const box = $('detail');
-  if (!d) return;
+  const box = $('dbody');
+  syncFollow();
+  if (!d) {
+    if (!S.selThread) return;
+    const th = S.thread;
+    box.innerHTML = '<div class="dhead"><div class="dtitle">' + esc(th ? th.title : '加载…') + '</div><div class="chips"><span>历史对话（网关重启前的记录，执行过程未保存）</span>' +
+      (th ? '<span><b>' + th.turns.length + '</b> 轮</span>' : '') + '<span class="mono dim">' + esc(S.selThread) + '</span></div></div>' +
+      '<div class="scroll">' + renderConversation(null) + '</div>';
+    const sc0 = box.querySelector('.scroll'); if (sc0 && scrollEnd) sc0.scrollTop = sc0.scrollHeight;
+    return;
+  }
   const prevScroll = box.querySelector('.scroll');
   const atBottom = prevScroll ? (prevScroll.scrollHeight - prevScroll.scrollTop - prevScroll.clientHeight < 40) : true;
   const keepTop = prevScroll ? prevScroll.scrollTop : 0;
-  const stTxt = { running: '进行中', ok: '完成', failed: '失败', cancelled: '已停止' }[d.status] || d.status;
+  const stTxt = ST[d.status] || d.status;
+  const tts = S.selThread ? ((threadRow(S.selThread) || { tasks: [] }).tasks) : [];
+  const nTurns = Math.max(tts.length, S.thread ? S.thread.turns.length : 0);
+  if (S.detailTab === 'conv' && nTurns < 2) S.detailTab = 'trace';
+  const turnsHtml = tts.length > 1 ? '<div class="turns">轮次' + tts.map(t => '<button class="' + (t.id === d.id ? 'on ' : '') + t.status + '" title="' + esc(t.title) + '" onclick="selectTurn(\'' + esc(t.id) + '\')">' + (t.turn || '?') + '</button>').join('') + '</div>' : '';
   const ref = S.refs[d.id];
   const answer = (ref && S.localAnswers[ref]) || d.answer || '';
   const nSteps = (d.timeline || []).filter(e => e.kind === 'step' && (e.step === 'tool')).length;
@@ -566,6 +702,7 @@ function renderDetail(scrollEnd) {
     '<div class="dhead">' +
       '<div class="dtitle">' + (esc(d.title) || '<span class="dim">（无标题）</span>') + '</div>' +
       '<div class="chips"><span class="pill ' + d.status + '">' + stTxt + '</span>' +
+        (d.turn > 1 ? '<span>第 <b>' + d.turn + '</b> 轮</span>' : '') +
         '<span>执行 <b class="mono">' + esc(d.executor || '–') + '</b></span>' +
         '<span>' + (d.mode === 'agent' ? 'Agent' : d.mode === 'committee' ? '委员会' : '问答') + ' · ' + esc(CAT[d.category] || d.category || '通用') + '</span>' +
         '<span>耗时 <b>' + fmtDur(d.duration_ms) + '</b></span>' +
@@ -578,13 +715,15 @@ function renderDetail(scrollEnd) {
           '<button class="' + (d.user_rating > 0 ? 'on' : '') + '" onclick="rate(\'' + esc(d.id) + '\',' + (d.user_rating > 0 ? 0 : 1) + ')">👍</button>' +
           '<button class="' + (d.user_rating < 0 ? 'on' : '') + '" onclick="rate(\'' + esc(d.id) + '\',' + (d.user_rating < 0 ? 0 : -1) + ')">👎</button></span>' : '') +
         '</div>' +
+      turnsHtml +
       (d.route_summary ? '<div class="route"><span class="k">路由</span><div style="min-width:0">' + esc(d.route_summary) + scoreTable(d.route) + '</div></div>' : '') +
       (d.status === 'failed' && d.error ? '<div class="route" style="border-color:rgba(248,81,73,.4)"><span class="k" style="color:var(--err)">失败</span><div>' + esc(d.error) + '</div></div>' : '') +
     '</div>' +
     '<div class="dtabs"><button class="dtab' + (S.detailTab === 'trace' ? ' on' : '') + '" data-t="trace">执行过程</button>' +
-      '<button class="dtab' + (S.detailTab === 'answer' ? ' on' : '') + '" data-t="answer">输出</button></div>' +
-    '<div class="scroll">' + (S.detailTab === 'trace' ? renderTimeline(d) : renderAnswer(answer, d)) + '</div>';
-  box.querySelectorAll('.dtab').forEach(b => b.onclick = () => { S.detailTab = b.dataset.t; renderDetail(S.detailTab === 'trace'); });
+      '<button class="dtab' + (S.detailTab === 'answer' ? ' on' : '') + '" data-t="answer">输出</button>' +
+      (nTurns > 1 ? '<button class="dtab' + (S.detailTab === 'conv' ? ' on' : '') + '" data-t="conv">对话 · ' + nTurns + ' 轮</button>' : '') + '</div>' +
+    '<div class="scroll">' + (S.detailTab === 'trace' ? renderTimeline(d) : S.detailTab === 'conv' ? renderConversation(d) : renderAnswer(answer, d)) + '</div>';
+  box.querySelectorAll('.dtab').forEach(b => b.onclick = () => { S.detailTab = b.dataset.t; if (S.detailTab === 'conv') loadThread(); renderDetail(S.detailTab !== 'answer'); });
   box.querySelectorAll('.tool .h').forEach(h => h.onclick = () => {
     const el = h.parentElement; el.classList.toggle('open');
     if (el.classList.contains('open')) S.openTools.add(el.dataset.id); else S.openTools.delete(el.dataset.id);
@@ -606,9 +745,7 @@ function renderAnswer(answer, d) {
     return '<div class="empty">' + (d.status === 'running' ? '等待输出…' :
       '没有输出') + '</div>';
   }
-  const parts = String(answer).split(/```[^\n]*\n?/);
-  const html = parts.map((p, i) => i % 2 ? '<pre>' + esc(p) + '</pre>' : esc(p).replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')).join('');
-  return '<div class="answer">' + html + '</div>';
+  return '<div class="answer">' + mdHtml(answer) + '</div>';
 }
 function clampText(text, key) {
   const open = S.openText.has(key);
@@ -728,11 +865,19 @@ function connectWs() {
     if (j.type === 'event') {
       if (j.event === 'task_started' && j.data && j.data.client_ref) {
         S.refs[j.request_id] = j.data.client_ref;
-        if (j.data.client_ref === S.pendingRef) { S.pendingRef = null; S.sel = j.request_id; S.detailTab = 'trace'; S.openTools.clear(); S.openText.clear(); S.dirtyDetail = true; }
+        if (j.data.client_ref === S.pendingRef) {
+          S.pendingRef = null; S.sel = j.request_id; S.detailTab = S.detailTab === 'conv' && j.data.turn > 1 ? 'conv' : 'trace';
+          S.selThread = j.data.thread || null; S.selKey = j.data.thread || j.request_id;
+          S.openTools.clear(); S.openText.clear(); S.dirtyDetail = true;
+        }
       }
       S.dirtyList = true;
       if (j.request_id === S.sel) S.dirtyDetail = true;
-      if (j.event === 'task_done') { setTimeout(loadResources, 300); setTimeout(loadAlerts, 400); }
+      if (j.event === 'task_done') {
+        setTimeout(loadResources, 300); setTimeout(loadAlerts, 400);
+        const t = S.tasks.find(x => x.id === j.request_id);
+        if (t && t.thread && t.thread === S.selThread) setTimeout(loadThread, 250);
+      }
       diagOnEvent(j);
     } else if (j.type === 'decision') {
       diagOnDecision(j.decision);
@@ -794,12 +939,14 @@ document.addEventListener('keydown', e => {
   else if (e.key === '[') { setList($('work').classList.contains('list-off')); }
   else if (e.key === 'j' || e.key === 'k') {
     const list = visibleTasks(); if (!list.length) return;
-    const i = list.findIndex(t => t.id === S.sel);
+    const i = list.findIndex(r => r.key === S.selKey);
     const n = e.key === 'j' ? Math.min(list.length - 1, i + 1) : Math.max(0, i < 0 ? 0 : i - 1);
-    select(list[n].id);
+    select(list[n].key);
     const el = document.querySelector('.task.sel'); if (el) el.scrollIntoView({ block: 'nearest' });
   } else if (e.key === '1') { S.detailTab = 'trace'; renderDetail(true); }
   else if (e.key === '2') { S.detailTab = 'answer'; renderDetail(false); }
+  else if (e.key === '3' && S.selThread) { S.detailTab = 'conv'; loadThread(); renderDetail(true); }
+  else if (e.key === 'r' && S.selThread) { e.preventDefault(); $('follow-in').focus(); }
 });
 
 /* ---------- diagnostics (raw views) ---------- */

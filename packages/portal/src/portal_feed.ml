@@ -36,6 +36,8 @@ type task = {
   review_score: int;  (** 0 = not reviewed, else 1..5 *)
   review_reason: string;
   reviewer: string;
+  thread: string;
+  turn: int;
 }
 
 type t = (string, task) ConcurrentHashMap.t
@@ -74,6 +76,8 @@ let empty_task = fun id ->
     review_score = 0;
     review_reason = "";
     reviewer = "";
+    thread = "";
+    turn = 0;
   }
 
 (** One-line task title: the prompt with whitespace collapsed. *)
@@ -240,8 +244,11 @@ let route_summary_of = fun ~goal ~category (data : Json.t) ->
   | Some c ->
       let explored = Json.get_field "explored" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
       let pinned = Json.get_field "pinned" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
+      let continued = Json.get_field "continued" data |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
       let why =
         if pinned then "你指定了这个 agent（不探索、不替换）"
+        else if continued && String.equal mode "agent" then "延续上一轮的 agent，接着它自己的会话继续"
+        else if continued then "延续上一轮的执行者，对话上下文连续"
         else if explored then "探索轮（每 10 次请求试 1 次记录少的候选，失败会回到常规首选）"
         else if String.equal mode "agent" then
           category_text category ^ "任务里这个 agent 的适配分最高"
@@ -336,6 +343,8 @@ let apply_event = fun (t : task) ~type_ (data : Json.t) ->
         mode = str data "mode" |> Option.unwrap_or ~default:t.mode;
         category_note = category_note_of data;
         prompt = str data "prompt" |> Option.unwrap_or ~default:t.prompt;
+        thread = str data "thread" |> Option.unwrap_or ~default:t.thread;
+        turn = int_field data "turn" |> Option.unwrap_or ~default:t.turn;
       }
   | "routed" ->
       let summary = route_summary_of ~goal:t.goal ~category:t.category data in
@@ -489,6 +498,8 @@ let summary_json = fun (t : task) ->
       ("steps", Json.int (List.length t.timeline));
       ("user_rating", Json.int t.user_rating);
       ("review_score", Json.int t.review_score);
+      ("thread", Json.string t.thread);
+      ("turn", Json.int t.turn);
     ]
 
 let detail_json = fun (t : task) ->
@@ -503,6 +514,7 @@ let detail_json = fun (t : task) ->
             ("route", t.route);
             ("timeline", Json.array (List.rev t.timeline));
             ("answer", Json.string t.answer);
+            ("prompt", Json.string t.prompt);
           ])
   | j -> j
 

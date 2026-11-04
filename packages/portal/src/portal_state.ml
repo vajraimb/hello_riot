@@ -33,7 +33,10 @@ type state = {
   quality: Portal_quality.t;
   route_turns: int Sync.Atomic.t;
   running: (string, Pid.t) ConcurrentHashMap.t;
+  threads: Portal_thread.t;
 }
+
+let threads_file = fun (state : state) -> (Sync.Atomic.get state.config).Portal_config.data_dir ^ "/threads.json"
 
 (* ---------- cancellation ---------- *)
 

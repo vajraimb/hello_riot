@@ -268,9 +268,39 @@ let execute_chat_sync = fun (state : state) (config : Portal_config.t) ~(decisio
         )
     in
     try_attempts [] candidates
+let has_role = fun (body : Json.t) role ->
+  Json.get_field "messages" body |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
+  |> List.any ~fn:(fun m -> String.equal (Json.get_field "role" m |> Option.and_then ~fn:Json.get_string |> Option.unwrap_or ~default:"") role)
+
+(** [body] with the thread's earlier turns placed after its system messages.
+    Clients that send their own history (any assistant message) are left
+    alone. *)
+let with_history = fun (body : Json.t) (th : Portal_thread.thread) ->
+  if has_role body "assistant" || List.is_empty th.Portal_thread.turns then body
+  else
+    let messages = Json.get_field "messages" body |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[] in
+    let is_system m = String.equal (Json.get_field "role" m |> Option.and_then ~fn:Json.get_string |> Option.unwrap_or ~default:"") "system" in
+    let merged = List.filter messages ~fn:is_system @ Portal_thread.history_messages th @ List.filter messages ~fn:(fun m -> not (is_system m)) in
+    match body with
+    | Json.Object fields ->
+        Json.obj (List.map fields ~fn:(fun (k, v) -> if String.equal k "messages" then (k, Json.array merged) else (k, v)))
+    | j -> j
+
 let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
   let config = Sync.Atomic.get state.config in
-  let body = parse_json_body ctx in
+  let raw_body = parse_json_body ctx in
+  let thread_id =
+    match get_header ctx "x-oasis-thread" |> Option.map ~fn:String.trim with
+    | Some id when not (String.is_empty id || String.equal id "new") -> id
+    | _ -> Portal_thread.new_id ()
+  in
+  let prior =
+    Portal_thread.get state.threads thread_id
+    |> Option.and_then ~fn:(fun th -> if List.is_empty th.Portal_thread.turns then None else Some th)
+  in
+  let last_turn = Option.and_then prior ~fn:Portal_thread.last_turn in
+  let body = match prior with Some th -> with_history raw_body th | None -> raw_body in
+  let ctx = Trail.put_resp_header ctx ~name:"X-Oasis-Thread" ~value:thread_id in
   let stream_requested =
     Json.get_field "stream" body |> Option.and_then ~fn:Json.get_bool
     |> Option.unwrap_or ~default:false
@@ -288,7 +318,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
   let category, category_hits =
     match explicit_category with
     | Some c -> (c, [])
-    | None -> Portal_classify.classify (Portal_feed.last_user_text body)
+    | None -> Portal_classify.classify (Portal_feed.last_user_text raw_body)
   in
   let goal =
     get_header ctx "x-oasis-goal"
@@ -321,6 +351,8 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
           ("goal", Json.string goal_str);
           ("title", Json.string (Portal_feed.title_of_body body));
           ("prompt", Json.string (Portal_steps.clip (Portal_feed.last_user_text body) 8000));
+          ("thread", Json.string thread_id);
+          ("turn", Json.int (match prior with Some th -> List.length th.Portal_thread.turns + 1 | None -> 1));
           ("source", Json.string (get_header ctx "x-oasis-source" |> Option.unwrap_or ~default:"api"));
           ("client_ref", Json.string (get_header ctx "x-oasis-client-ref" |> Option.unwrap_or ~default:""));
           ("category_source", Json.string (match explicit_category with Some _ -> "header" | None -> "auto"));
@@ -341,8 +373,19 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
   let pinned_agent =
     get_header ctx "x-oasis-agent" |> Option.map ~fn:String.trim |> Option.and_then ~fn:(fun a -> if String.is_empty a then None else Some a)
   in
+  let explicit_mode = Option.is_some (get_header ctx "x-oasis-mode") || Option.is_some pinned_agent in
+  (* a follow-up without its own routing headers continues the way the
+     previous turn ran *)
+  let follow_up = Option.is_some last_turn && not explicit_mode && Option.is_none explicit_category in
+  let last_mode = match last_turn with Some x when follow_up -> x.Portal_thread.mode | _ -> "" in
+  let last_executor = match last_turn with Some x -> x.Portal_thread.executor | None -> "" in
   let committee =
-    get_header ctx "x-oasis-committee" |> Option.map ~fn:Portal_committee.parse_members |> Option.unwrap_or ~default:[]
+    match get_header ctx "x-oasis-committee" |> Option.map ~fn:Portal_committee.parse_members with
+    | Some m -> m
+    | None -> (
+        match prior with
+        | Some th when String.equal last_mode "committee" -> th.Portal_thread.members
+        | _ -> [])
   in
   if not (List.is_empty committee) then
     Portal_committee.handle state ctx body ~members:committee ~category ~goal ~request_id
@@ -350,6 +393,8 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
   let mode =
     match get_header ctx "x-oasis-mode" with
     | _ when Option.is_some pinned_agent -> `Agent
+    | None when String.equal last_mode "agent" -> `Agent
+    | None when follow_up && not (String.is_empty last_mode) -> `Chat
     | Some "agent" -> `Agent
     | Some "chat" -> `Chat
     | _ ->
@@ -369,7 +414,9 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
     && not (List.is_empty config.Portal_config.agents)
   in
   if use_agent then
-    handle_chat_agent ?pinned:pinned_agent state ctx body ~category ~stream_requested ~request_id
+    handle_chat_agent ?pinned:pinned_agent
+      ?prefer:(if String.equal last_mode "agent" && not (String.is_empty last_executor) then Some last_executor else None)
+      ?thread:prior state ctx body ~category ~stream_requested ~request_id
   else
   let decision =
     Portal_router.route_scored
@@ -378,6 +425,11 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
       ~goal
       task
     |> maybe_explore state
+  in
+  let decision, continued =
+    if follow_up && not (String.is_empty last_executor) && not (String.equal last_mode "committee") then
+      prefer_first decision (Some last_executor)
+    else (decision, false)
   in
   (* sticky session: if the session is pinned to an account that still
      passes the hard constraints, prefer it (multi-turn context stays on
@@ -432,7 +484,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
       candidates
   in
   let extra = passthrough_fields body in
-  emit_routed state ~request_id ~mode:"account" decision;
+  emit_routed ~continued state ~request_id ~mode:"account" decision;
   (* pin at dispatch (updated again on successful handoff) *)
   (
     match (session, List.head candidates) with

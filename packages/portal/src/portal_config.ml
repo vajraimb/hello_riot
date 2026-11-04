@@ -256,6 +256,9 @@ let parse_agent = fun fields ->
           env_passthrough =
             field fields "env_passthrough" |> Option.and_then ~fn:str_list
             |> Option.unwrap_or ~default:[];
+          resume_args =
+            field fields "resume_args" |> Option.and_then ~fn:str_list
+            |> Option.unwrap_or ~default:[];
         }
 
 let parse_route = fun fields ->

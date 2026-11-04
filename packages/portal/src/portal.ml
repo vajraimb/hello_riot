@@ -32,6 +32,7 @@ module Classify = Portal_classify
 module Upstream = Portal_upstream
 module Quality = Portal_quality
 module Judge = Portal_judge
+module Thread = Portal_thread
 module Committee = Portal_committee
 module Mcp = Portal_mcp
 module Task = Portal_task

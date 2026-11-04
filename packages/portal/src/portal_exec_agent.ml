@@ -170,14 +170,50 @@ let agent_result_json = fun ~agent ~text ->
       );
     ]
 
-let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Json.t) ~(category : string) ~(stream_requested : bool) ~(request_id : string) ->
+(** Puts [prefer] (the agent of the previous turn) first when it is still a
+    candidate. *)
+let prefer_first = fun (d : Portal_router.decision) prefer ->
+  let all = (match d.Portal_router.chosen with Some c -> [ c ] | None -> []) @ d.Portal_router.fallback_order in
+  match prefer with
+  | Some p when List.any all ~fn:(String.equal p) ->
+      ({ d with Portal_router.chosen = Some p; fallback_order = List.filter all ~fn:(fun a -> not (String.equal a p)) }, true)
+  | _ -> (d, false)
+
+(** Emits [agent_session] when an agent announces a (new) CLI session id. *)
+let session_watch = fun (state : state) ~request_id ->
+  let last = ref "" in
+  fun ~agent line ->
+    match Portal_agent.session_id_of_line line with
+    | Some sid when not (String.equal sid !last) ->
+        last := sid;
+        broadcast_event state ~type_:"agent_session" ~request_id
+          ~data:(Json.obj [ ("agent", Json.string agent); ("session", Json.string sid) ])
+    | _ -> ()
+
+let handle_chat_agent = fun ?pinned ?prefer ?thread (state : state) (ctx : Trail.ctx) (body : Json.t) ~(category : string) ~(stream_requested : bool) ~(request_id : string) ->
   audit_log state ~path:"/agent-path-enter" ~category ~goal:"-" ~stream_:stream_requested ~request_id ();
   let config = Sync.Atomic.get state.config in
   let model =
     Json.get_field "model" body |> Option.and_then ~fn:Json.get_string
   in
   let decision = route_agents ?only:pinned state config category model in
-  emit_routed ~pinned:(Option.is_some pinned) state ~request_id ~mode:"agent" decision;
+  let decision, continued = if Option.is_some pinned then (decision, false) else prefer_first decision prefer in
+  emit_routed ~pinned:(Option.is_some pinned) ~continued state ~request_id ~mode:"agent" decision;
+  let watch_session = session_watch state ~request_id in
+  (* a follow-up resumes the agent's own CLI session when it has one; any
+     other agent gets the conversation replayed in its prompt *)
+  let prompt_for nm (agent : Portal_agent.agent) prompt0 =
+    let resumed =
+      match thread with
+      | None -> None
+      | Some th ->
+          Portal_thread.session_of th ~agent:nm
+          |> Option.and_then ~fn:(fun sid -> Portal_agent.with_resume agent ~session:sid)
+    in
+    match resumed with
+    | Some a -> (a, Portal_feed.last_user_text body)
+    | None -> (agent, prompt0)
+  in
   audit_log
     state
     ~path:"/agent-path-routed"
@@ -238,14 +274,14 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
                   | Some m -> m
                   | None -> List.head agent.Portal_agent.models |> Option.unwrap_or ~default:""
                 in
+                let agent, base_prompt = prompt_for nm agent prompt0 in
                 let prompt =
-                  if String.is_empty !sent then prompt0
+                  if String.is_empty !sent then base_prompt
                   else
-                    prompt0
+                    base_prompt
                     ^ "\n\n[上一个 agent 的输出已部分完成，请直接继续并补全任务。之前输出:]\n"
                     ^ !sent
                 in
-                let agent = agent in
                 (* spawn streaming runner on a blocking lane *)
                 let me = self () in
                 let leg = ref 1 in
@@ -318,6 +354,7 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
                   ("chosen", Json.string !current);
                   ("attempts", Json.int (List.length !attempts));
                   ("ok", Json.bool true);
+                  ("answer", Json.string (Portal_steps.clip !sent 60000));
                 ]);
           let _ = write_stream client_stream "data: [DONE]\n\n" in
           send (self ()) (Conductor_done (Ok ()))
@@ -417,6 +454,7 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
                 let _ = write_stream client_stream "data: [DONE]\n\n" in
                 ()
             | `Line line -> (
+                watch_session ~agent:!current line;
                 let text, steps =
                   Portal_agent.consume_line
                     joiner
@@ -500,10 +538,12 @@ let handle_chat_agent = fun ?pinned (state : state) (ctx : Trail.ctx) (body : Js
                 in
                 let t0 = Time.Instant.now () in
                 emit_attempt_started state ~request_id ~account:nm;
-                let on_line =
+                let observe =
                   agent_step_observer state ~request_id ~agent:nm ~command:agent.Portal_agent.command
                 in
-                let result = blocking_agent_call ~on_line ~agent ~model:model_for ~prompt:prompt0 in
+                let on_line line = watch_session ~agent:nm line; observe line in
+                let agent, prompt = prompt_for nm agent prompt0 in
+                let result = blocking_agent_call ~on_line ~agent ~model:model_for ~prompt in
                 let latency_ms = Time.Duration.to_millis (Time.Instant.elapsed t0) in
                 emit_attempt_finished
                   state

@@ -28,6 +28,7 @@ type agent = {
   concurrency_limit: int;
   allowed_workdirs: string list;
   env_passthrough: string list;
+  resume_args: string list;  (** [{session}] placeholder; [] = default for the CLI *)
 }
 
 type Message.t +=
@@ -58,6 +59,46 @@ let build_args = fun (a : agent) ~model ~prompt ->
         if String.equal arg "{prompt}" then prompt else arg
       in
       if String.equal arg "{model}" then model else arg)
+
+(* ---------- sessions ---------- *)
+
+let command_name = fun (a : agent) ->
+  match List.rev (String.split_on_char '/' a.command) with n :: _ -> n | [] -> a.command
+
+(** How each known CLI resumes a session by id (verified with claude 2.x,
+    cursor-agent, gemini, grok; kimi per its help). *)
+let default_resume_args = fun name ->
+  match name with
+  | "claude" | "cursor-agent" | "gemini" | "grok" -> [ "--resume"; "{session}" ]
+  | "kimi" -> [ "--session"; "{session}" ]
+  | _ -> []
+
+let resume_args = fun (a : agent) ->
+  if List.is_empty a.resume_args then default_resume_args (command_name a) else a.resume_args
+
+(** The agent set up to continue [session], or None when its CLI has no
+    known way to resume. The resume flags go first: some templates end in
+    a flag that takes the prompt as its value ([-p {prompt}]). *)
+let with_resume = fun (a : agent) ~session ->
+  match resume_args a with
+  | [] -> None
+  | ra ->
+      let ra = List.map ra ~fn:(fun x -> if String.equal x "{session}" then session else x) in
+      Some { a with args_template = ra @ a.args_template }
+
+(** The CLI session id a stdout line announces ([session_id] for claude,
+    cursor-agent, gemini; [sessionId] for grok). *)
+let session_id_of_line = fun (line : string) ->
+  if not (String.contains line "ession") then None
+  else
+    match Json.from_string line with
+    | Error _ -> None
+    | Ok j -> (
+        let field k = Json.get_field k j |> Option.and_then ~fn:Json.get_string in
+        match field "session_id" with
+        | Some s when not (String.is_empty s) -> Some s
+        | _ -> (match field "sessionId" with Some s when not (String.is_empty s) -> Some s | _ -> None)
+      )
 
 (* ---------- output parsing ---------- *)
 

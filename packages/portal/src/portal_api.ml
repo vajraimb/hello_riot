@@ -229,6 +229,18 @@ let handle_feed_task = fun (state : state) (ctx : Trail.ctx) ->
 
 (** POST {"id", "rating": 1 | -1 | 0}: the user's verdict on a finished task
     feeds the executor's learned quality for that category (0 withdraws). *)
+(** GET /api/threads?limit=: recent conversations, newest first. *)
+let handle_list_threads = fun (state : state) (ctx : Trail.ctx) ->
+  let limit = query_param ctx "limit" |> Option.and_then ~fn:Int.from_string_opt |> Option.unwrap_or ~default:50 in
+  Trail.json ctx
+    (Json.obj [ ("threads", Json.array (List.map (Portal_thread.recent state.threads ~limit) ~fn:Portal_thread.summary_json)) ])
+
+(** GET /api/thread?id=: every turn of one conversation. *)
+let handle_get_thread = fun (state : state) (ctx : Trail.ctx) ->
+  match query_param ctx "id" |> Option.and_then ~fn:(Portal_thread.get state.threads) with
+  | Some th -> Trail.json ctx (Portal_thread.to_json th)
+  | None -> Trail.json ~status:Net.Http.Status.NotFound ctx (Json.obj [ ("error", Json.string "没有这个对话") ])
+
 (** POST /api/feed/cancel {"id"}: stops a running task (kills the agent
     process / drops the upstream wait); no failover, no health penalty. *)
 let handle_cancel_task = fun (state : state) (ctx : Trail.ctx) ->

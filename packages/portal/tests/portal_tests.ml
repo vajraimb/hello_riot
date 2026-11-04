@@ -1622,6 +1622,7 @@ let mk_agent = fun ?(tier = 4) ?(command = "/bin/sh") ?(args = [ "{prompt}" ]) ?
     concurrency_limit = concurrency;
     allowed_workdirs = [];
     env_passthrough = [];
+    resume_args = [];
   }
 
 let fix = fun name -> "./packages/portal/tests/fixtures/" ^ name
@@ -3322,6 +3323,79 @@ let test_gateway_client_deadline_accounts = fun _ctx ->
                       Test.assert_equal ~expected:true ~actual:(String.contains feed "\"status\":\"cancelled\"");
                       Ok ()))))
 
+let latest_thread = fun ~port ->
+  match gw_get ~port ~path:"/api/feed?limit=1" with
+  | Error e -> Error e
+  | Ok (_, feed) -> (
+      match Json.from_string feed |> Result.to_option |> Option.and_then ~fn:(Json.get_field "tasks") |> Option.and_then ~fn:Json.get_array with
+      | Some (t :: _) -> Ok (Json.get_field "thread" t |> Option.and_then ~fn:Json.get_string |> Option.unwrap_or ~default:"")
+      | _ -> Error "empty feed")
+
+let test_gateway_thread_carries_history = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let m = List.get_unchecked mocks ~at:0 in
+      Mock.set_scenario m { (Mock.default_scenario) with body = openai_ok_body ~content:"first-answer" };
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let post headers text =
+            gw_post ~port:gw.port ~path:"/v1/chat/completions" ~headers:(("Content-Type", "application/json") :: headers) ~body:(chat_body text)
+          in
+          match post [] "first-question" with
+          | Error e -> Error e
+          | Ok _ -> (
+              match latest_thread ~port:gw.port with
+              | Error e -> Error e
+              | Ok th -> (
+                  Test.assert_equal ~expected:true ~actual:(String.starts_with ~prefix:"th-" th);
+                  match post [ ("X-Oasis-Thread", th) ] "second-question" with
+                  | Error e -> Error e
+                  | Ok (status, _) -> (
+                      Test.assert_equal ~expected:200 ~actual:status;
+                      let sent = Mock.last_request m in
+                      Test.assert_equal ~expected:true ~actual:(String.contains sent "first-question");
+                      Test.assert_equal ~expected:true ~actual:(String.contains sent "first-answer");
+                      Test.assert_equal ~expected:true ~actual:(String.contains sent "second-question");
+                      match gw_get ~port:gw.port ~path:("/api/thread?id=" ^ th) with
+                      | Error e -> Error e
+                      | Ok (_, tj) ->
+                          let turns =
+                            Json.from_string tj |> Result.to_option |> Option.and_then ~fn:(Json.get_field "turns")
+                            |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
+                          in
+                          Test.assert_equal ~expected:2 ~actual:(List.length turns);
+                          Ok ())))))
+
+let test_gateway_thread_resumes_agent_session = fun _ctx ->
+  let agent = { (mk_agent ~command:(fix "agent_session.sh") ~args:[ "{prompt}" ] "agent_s") with Agent.resume_args = [ "--resume"; "{session}" ] } in
+  let config =
+    mk_config_agents ~accounts:[ mk_account "acc_api" ] ~agents:[ agent; mk_agent ~args:[ fix "agent_ok.sh" ] "agent_other" ]
+      ~kb:[ mk_kb_model "m-x" ] ~routes:[] ~max_fallback:1
+  in
+  match Gateway.start ~config_path:None ~config ~port:0 () with
+  | Error e -> Error ("gateway: " ^ e)
+  | Ok gw -> (
+      let post headers text =
+        gw_post ~port:gw.port ~path:"/v1/chat/completions" ~headers:(("Content-Type", "application/json") :: headers) ~body:(chat_body text)
+      in
+      match post [ ("X-Oasis-Agent", "agent_s") ] "build-it" with
+      | Error e -> Error e
+      | Ok (_, first) -> (
+          Test.assert_equal ~expected:false ~actual:(String.contains first "--resume");
+          match latest_thread ~port:gw.port with
+          | Error e -> Error e
+          | Ok th -> (
+              match post [ ("X-Oasis-Thread", th) ] "now-test-it" with
+              | Error e -> Error e
+              | Ok (status, second) ->
+                  Test.assert_equal ~expected:200 ~actual:status;
+                  (* same agent, its own session, only the new message *)
+                  Test.assert_equal ~expected:true ~actual:(String.contains second "args: --resume sess-42 now-test-it");
+                  Test.assert_equal ~expected:false ~actual:(String.contains second "build-it");
+                  Ok ())))
+
 let test_upstream_body_max_tokens_passthrough = fun _ctx ->
   let messages = Json.array [] in
   let has_max b = String.contains b "max_tokens" in
@@ -3887,6 +3961,8 @@ let tests =
     case "quality: ratings blend into fit" test_quality_blend;
     case "committee: members and feed events" test_committee_members_and_feed;
     case "gateway: committee answers and synthesis" test_gateway_committee;
+    case "gateway: thread follow-up carries the conversation" test_gateway_thread_carries_history;
+    case ~size:Test.Large "gateway: thread follow-up resumes the agent session" test_gateway_thread_resumes_agent_session;
     case ~size:Test.Large "gateway: caller deadline cancels account calls without failover" test_gateway_client_deadline_accounts;
     case ~size:Test.Large "gateway: agents run until cancelled" test_gateway_agent_runs_until_cancelled;
     case "router: exploration promotes the least-measured" test_router_explore;

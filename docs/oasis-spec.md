@@ -234,10 +234,10 @@ daily 语义）是**每 30s 烧一次请求并污染时延 EMA**。0.3 区分三
 
 | 接口 | 说明 |
 |---|---|
-| `POST /v1/chat/completions` | OpenAI 兼容（流式 SSE / 非流式）；头 `X-Oasis-Category` `X-Oasis-Goal` `X-Oasis-Mode` `X-Oasis-Session`；可选 `X-Oasis-Source`（来源标签，默认 `api`）、`X-Oasis-Client-Ref`（原样回显在 `task_started`，供控制台关联自己发起的请求）、`X-Oasis-Agent`（指定 agent）、`X-Oasis-Committee`（委员会成员，§2.4） |
+| `POST /v1/chat/completions` | OpenAI 兼容（流式 SSE / 非流式）；头 `X-Oasis-Category` `X-Oasis-Goal` `X-Oasis-Mode` `X-Oasis-Session`；可选 `X-Oasis-Source`（来源标签，默认 `api`）、`X-Oasis-Client-Ref`（原样回显在 `task_started`，供控制台关联自己发起的请求）、`X-Oasis-Agent`（指定 agent）、`X-Oasis-Committee`（委员会成员，§2.4）、`X-Oasis-Thread`（续接对话，§2.6.2；响应头回传本轮所属的对话 id） |
 | `GET /v1/models` | KB 模型列表 |
 | `POST /mcp` | MCP（JSON-RPC 2.0 / Streamable HTTP 简化）11 工具：oasis_ask、oasis_agent_task、oasis_task_status、oasis_status、oasis_decisions、oasis_send_message、oasis_check_inbox、oasis_ask_user、oasis_activity、oasis_agents、oasis_models |
-| `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点 + 已配置 agent 的信号）、activity（时间线）、requests（审计）、**feed**（最近任务摘要）、**feed/task?id=**（单任务：路由说明 + 时间线 + 回答）、**alerts**（需要处理的问题 + 可复制的修复命令） |
+| `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点 + 已配置 agent 的信号）、activity（时间线）、requests（审计）、**feed**（最近任务摘要）、**feed/task?id=**（单任务：路由说明 + 时间线 + 回答）、**threads?limit=**（最近对话摘要）、**thread?id=**（整段对话：各轮问答 + agent 会话 id；不存在 404）、**alerts**（需要处理的问题 + 可复制的修复命令） |
 | `WS /ws` | 实时推送：decision + 事件流（task_started → routed → attempt_started → attempt_finished → **[0.3 新增]** handoff → task_done，以及 agent 的 `agent_step`） |
 | `GET /` | 控制台（§2.6）：工作台（任务列表 / 任务详情 / 需要你处理 + 资源）与诊断页（账户明细、原始决策、过程图、agent 盘点、会话活动、收件箱） |
 
@@ -261,7 +261,27 @@ agent 回答文字。路由说明与切换说明在服务端生成人话（"交�
   agent 的说明文字作为步骤进入任务流
 - 控制台不是聊天布局：输入栏 + 三栏（任务列表 / 详情：路由说明、执行过程时间线、输出 / 需要你处理 + 资源），
   右栏可收起（顶栏「侧栏」按钮或 `\`，状态存 localStorage），收起后详情栏占满剩余宽度；
-  键盘 `/` 输入、`⌘↵` 运行、`j` `k` 切换任务、`1` `2` 切换详情页签、`\` 切换右栏
+  键盘 `/` 输入、`⌘↵` 运行、`j` `k` 切换任务、`1` `2` `3` 切换详情页签（执行过程 / 输出 / 对话）、`r` 聚焦续接输入框、`\` 切换右栏
+
+#### 2.6.2 连续对话（thread）
+
+每个请求都属于一个对话（`Portal_thread`）：没带 `X-Oasis-Thread` 时新建（`th-…`），带了就作为下一轮追加。
+`task_done` 时把本轮（问题、回答前 20000 字、执行者、模式、状态）写入对话并落盘 `data_dir/threads.json`
+（保留最近 300 个，重启后仍可续接）。
+
+- **上下文**：账户路径把历史轮次按 user/assistant 插到 system 消息之后（最多约 60000 字，保留最新的轮次；
+  未完成的轮次标注「上一轮未完成」）；调用方自己已带 assistant 历史时不再插入
+- **继承**：续接轮没有显式指定 mode / agent / category 时沿用上一轮：agent 轮继续交给同一个 agent
+  （路由优先它，`routed` 带 `continued`，人话写「延续上一轮的 agent」）；委员会轮沿用同一组成员；
+  问答轮优先上一轮的账户，失败时照常回退。显式指定的头总是优先
+- **agent 会话续接**：agent 输出里的会话 id（`session_id` / `sessionId`，取最后一个）通过 `agent_session`
+  事件记入对话。续接时用 `resume_args` 让 CLI 接着自己的会话，只把新的一句话作为 prompt；
+  默认 claude / cursor-agent / gemini / grok 为 `["--resume", "{session}"]`，kimi 为 `["--session", "{session}"]`，
+  可在 `[[agents]]` 里用 `resume_args` 覆盖。换了 agent 或没有会话 id 时退回到「历史文本 + 新问题」
+- **控制台**：任务列表按对话分组（一行一个对话，显示轮数；只在 `threads.json` 里的旧对话标「历史」），
+  详情里有轮次切换、「对话 · n 轮」页签和底部续接输入框（显示这一轮会交给谁、是否续接 CLI 会话）；
+  上一轮还在执行时不能续接
+- 限制：MCP 工具暂不支持 thread；任务流的执行过程不落盘，历史对话只能看问答
 
 #### 2.6.1 诊断页过程图
 
@@ -288,6 +308,7 @@ spec 只约束**语义**：
                   # [0.3] stream_usage = true（流式请求附 stream_options.include_usage）
                   # connect_ip = "1.2.3.4"（可选，TCP 连接改连此 IP 绕过 DNS 污染；SNI/Host 仍用 base_url 域名）
 [[agents]]        # 见 2.2；enabled=false 的 agent 不进候选池
+                  # resume_args = ["--resume", "{session}"]（续接 CLI 会话，见 §2.6.2）
                   # [0.3] allowed_workdirs = ["/home/u/proj"] / env_passthrough = ["GH_TOKEN"]（见 §5）
 [[routes]]        # category -> 账户链
 [policy]          # goal / agent_categories（自动走 agent 池的类别）/ max_fallback
