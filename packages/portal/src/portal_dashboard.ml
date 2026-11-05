@@ -92,7 +92,7 @@ body.resizing{cursor:col-resize;user-select:none}
 .task .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .task .m{grid-column:2;font-size:11.5px;color:var(--muted);display:flex;gap:8px;white-space:nowrap;overflow:hidden}
 .st{font-family:var(--mono);font-size:12px;line-height:20px;text-align:center}
-.st.ok{color:var(--ok)}.st.failed{color:var(--err)}.st.running{color:var(--accent)}.st.cancelled{color:var(--muted)}
+.st.ok{color:var(--ok)}.st.failed{color:var(--err)}.st.running{color:var(--accent)}.st.cancelled{color:var(--muted)}.st.interrupted{color:var(--warn,#d29922)}
 .spin{display:inline-block;width:10px;height:10px;border:1.5px solid var(--accent);border-right-color:transparent;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-1px}
 @keyframes sp{to{transform:rotate(360deg)}}
 .tag{font-size:10.5px;padding:0 5px;border-radius:3px;border:1px solid var(--line2);color:var(--muted);line-height:16px}
@@ -113,6 +113,9 @@ body.resizing{cursor:col-resize;user-select:none}
 .pill.ok{background:rgba(63,185,80,.14);color:var(--ok)}
 .pill.failed{background:rgba(248,81,73,.14);color:var(--err)}
 .pill.cancelled{background:rgba(139,148,158,.14);color:var(--muted)}
+.pill.interrupted{background:rgba(210,153,34,.14);color:var(--warn,#d29922)}
+.delbtn{background:none;border:1px solid var(--line);border-radius:4px;color:var(--muted);padding:0 8px;line-height:20px;cursor:pointer;font-size:12px;margin-left:auto}
+.delbtn:hover{border-color:rgba(248,81,73,.5);color:var(--err)}
 .stopbtn{background:none;border:1px solid rgba(248,81,73,.5);border-radius:4px;color:var(--err);padding:0 8px;line-height:20px;cursor:pointer;font-size:12px}
 .stopbtn:hover{background:rgba(248,81,73,.12)}
 .pill.running{background:rgba(91,140,255,.15);color:var(--accent2)}
@@ -556,7 +559,7 @@ function rowsAll() {
 }
 function statusGlyph(st) {
   if (st === 'running') return '<span class="spin"></span>';
-  return st === 'ok' ? '✓' : st === 'cancelled' ? '■' : '✗';
+  return st === 'ok' ? '✓' : st === 'cancelled' ? '■' : st === 'interrupted' ? '⏸' : '✗';
 }
 function visibleTasks() {
   return rowsAll().filter(r => S.filter === 'all' || r.status === S.filter);
@@ -649,6 +652,33 @@ async function loadThread() {
 }
 
 /* ---------- detail ---------- */
+function clearSel(msg) {
+  S.sel = null; S.selKey = null; S.selThread = null; S.detail = null; S.thread = null; S.ws = null; S.wsFile = null;
+  $('dbody').innerHTML = '<div class="empty" style="margin:auto">' + esc(msg || '选择左侧任务查看路由说明和执行过程') + '</div>';
+  syncFollow();
+}
+async function deleteSel() {
+  const row = rowsAll().find(r => r.key === S.selKey);
+  if (!row) return;
+  const what = row.thread ? '这个对话（' + row.n + ' 轮）' : '这个任务';
+  if (!confirm('删除' + what + '？\n' + (row.status === 'running' ? '正在执行的这一轮会先停掉。\n' : '') + '任务记录和对话历史删除后不能恢复。')) return;
+  let files = false;
+  if (wsId()) {
+    const n = S.ws && S.ws.files ? S.ws.files.length : 0;
+    files = confirm((n ? '同时删除产出目录里的 ' + n + ' 个文件？' : '同时删除它的工作目录？') + '\n确定＝删除文件，取消＝保留文件');
+  }
+  try {
+    const r = await fetch('/api/thread/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(row.thread ? { id: row.thread, files } : { task: row.key, files }) });
+    const j = await r.json();
+    if (!r.ok) { toast(j.error || '删除失败'); return; }
+    S.tasks = S.tasks.filter(t => (t.thread || t.id) !== row.key);
+    S.threads = S.threads.filter(t => t.id !== row.key);
+    clearSel('已删除' + (j.stopped ? '（先停掉了正在执行的一轮）' : '') + (j.workspaces_kept && j.workspaces_kept.length ? '，产出文件保留' : ''));
+    renderList();
+    S.dirtyList = true;
+  } catch (e) { toast('删除失败'); }
+}
 async function stopTask(id) {
   try {
     const r = await fetch('/api/feed/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
@@ -693,7 +723,7 @@ function scoreTable(route) {
 }
 const REASON = { unknown_account: '未在配置中', disabled: '已停用', model_not_served: '不提供所需模型', context_too_small: '上下文不够', budget_exhausted: '预算用完', daily_limit_reached: '今日次数用完', quota_parked: '额度暂停中', circuit_open: '熔断中', rpm_exhausted: '每分钟限额满', concurrency_limit: '并发已满' };
 
-const ST = { running: '进行中', ok: '完成', failed: '失败', cancelled: '已停止' };
+const ST = { running: '进行中', ok: '完成', failed: '失败', cancelled: '已停止', interrupted: '已中断' };
 function syncFollow() {
   const id = S.selThread;
   $('followbar').classList.toggle('on', !!id);
@@ -738,8 +768,10 @@ function renderDetail(scrollEnd) {
     if (!S.selThread) return;
     const th = S.thread;
     box.innerHTML = '<div class="dhead"><div class="dtitle">' + esc(th ? th.title : '加载…') + '</div><div class="chips"><span>历史对话（网关重启前的记录，执行过程未保存）</span>' +
-      (th ? '<span><b>' + th.turns.length + '</b> 轮</span>' : '') + '<span class="mono dim">' + esc(S.selThread) + '</span></div></div>' +
+      (th ? '<span><b>' + th.turns.length + '</b> 轮</span>' : '') + '<span class="mono dim">' + esc(S.selThread) + '</span>' +
+      '<button class="delbtn" id="del-btn" title="删除这个对话；可选是否同时删除产出文件">删除</button></div></div>' +
       '<div class="scroll">' + renderConversation(null) + '</div>';
+    $('del-btn').onclick = deleteSel;
     const sc0 = box.querySelector('.scroll'); if (sc0 && scrollEnd) sc0.scrollTop = sc0.scrollHeight;
     return;
   }
@@ -770,6 +802,7 @@ function renderDetail(scrollEnd) {
         '<span>来源 ' + esc(SRC[d.source] || d.source) + '</span>' +
         '<span class="mono dim" style="cursor:pointer" title="复制 request id" onclick="copy(\'' + esc(d.id) + '\')">' + esc(d.id) + '</span>' +
         (d.review_score ? '<span title="' + esc((d.reviewer || '') + '：' + (d.review_reason || '')) + '">抽检 <b>' + d.review_score + '/5</b></span>' : '') +
+        '<button class="delbtn" id="del-btn" title="删除这个对话和它的任务记录；可选是否同时删除产出文件">删除</button>' +
         (d.status === 'running' ? '<button class="stopbtn" title="结束这个任务：杀掉 agent 进程 / 放弃等待上游，不换下一个候选，也不扣执行者的健康分" onclick="stopTask(\'' + esc(d.id) + '\')">■ 停止</button>' : '') +
         (d.status === 'ok' && d.executor ? '<span class="rate" title="你的评价会计入 ' + esc(d.executor) + ' 在这类任务上的质量分，影响以后的路由">' +
           '<button class="' + (d.user_rating > 0 ? 'on' : '') + '" onclick="rate(\'' + esc(d.id) + '\',' + (d.user_rating > 0 ? 0 : 1) + ')">👍</button>' +
@@ -785,6 +818,7 @@ function renderDetail(scrollEnd) {
       (ws ? '<button class="dtab' + (S.detailTab === 'files' ? ' on' : '') + '" data-t="files">产出' + (S.ws && S.ws.id === ws && S.ws.files ? ' · ' + S.ws.files.length : '') + '</button>' : '') + '</div>' +
     '<div class="scroll">' + (S.detailTab === 'trace' ? renderTimeline(d) : S.detailTab === 'conv' ? renderConversation(d) : S.detailTab === 'files' ? renderFiles() : renderAnswer(answer, d)) + '</div>';
   if ($('route-tog')) $('route-tog').onclick = toggleRoute;
+  if ($('del-btn')) $('del-btn').onclick = deleteSel;
   if ($('wd-chip')) $('wd-chip').onclick = () => copy(d.workdir);
   if ($('ws-copy')) $('ws-copy').onclick = () => copy(S.ws.dir);
   if ($('ws-reload')) $('ws-reload').onclick = () => loadWorkspace(S.ws.id);
@@ -935,6 +969,15 @@ function connectWs() {
   ws.onmessage = m => {
     let j; try { j = JSON.parse(m.data); } catch (e) { return; }
     if (j.type === 'event') {
+      if (j.event === 'thread_deleted') {
+        const ids = (j.data && j.data.tasks) || [];
+        const gone = (S.selThread && S.selThread === j.data.thread) || ids.includes(S.sel);
+        S.tasks = S.tasks.filter(t => !ids.includes(t.id));
+        S.threads = S.threads.filter(t => t.id !== j.data.thread);
+        if (gone) clearSel('这个对话已被删除');
+        S.dirtyList = true;
+        return;
+      }
       if (j.event === 'task_started' && j.data && j.data.client_ref) {
         S.refs[j.request_id] = j.data.client_ref;
         if (j.data.client_ref === S.pendingRef) {

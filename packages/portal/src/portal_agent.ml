@@ -209,12 +209,30 @@ let child_env = fun (a : agent) ->
     [child_env]: [Process.spawn ~env] would merge into the gateway's own
     environment, which holds every upstream API key. *)
 let group_leader_script =
-  {|setpgrp(0, 0);
+  {|use POSIX ':sys_wait_h';
+setpgrp(0, 0);
+my $gateway = getppid();
 my $pid = fork();
 exit 127 unless defined $pid;
 if ($pid == 0) { exec { $ARGV[0] } @ARGV or exit 127 }
-waitpid($pid, 0);
-my $st = $?;
+my $st = 0;
+while (1) {
+  my $r = waitpid($pid, WNOHANG);
+  if ($r == $pid) { $st = $?; last }
+  last if $r < 0;
+  if (getppid() != $gateway) {
+    my (%kids, @group);
+    if (open(my $ps, '-|', '/bin/ps', '-A', '-o', 'pid=,ppid=,pgid=')) {
+      for (<$ps>) { my ($p, $pp, $pg) = split ' '; push @{$kids{$pp}}, $p; push @group, $p if $pg == $$ && $p != $$ }
+      close($ps);
+    }
+    my @q = ($pid); my @tree;
+    while (@q) { my $p = shift @q; push @tree, $p; push @q, @{$kids{$p} || []} }
+    kill 'KILL', @tree, @group;
+    exit 137;
+  }
+  select(undef, undef, undef, 0.2);
+}
 if (open(my $ps, '-|', '/bin/ps', '-A', '-o', 'pid=,pgid=')) {
   my @rest = map { $_->[0] } grep { $_->[1] == $$ && $_->[0] != $$ } map { [split ' '] } <$ps>;
   close($ps);
@@ -249,7 +267,9 @@ let spawn_proc = fun ~(agent : agent) ~args () ->
      tree (gemini re-execs into a node child that outlives a SIGKILL of the
      parent). It also reaps the group once the agent exits: helpers such as
      cursor-agent's daemonized worker-server inherit stdout, and a pipe
-     held open by them would block the reader forever. *)
+     held open by them would block the reader forever. And it watches the
+     gateway: once its parent is gone (restart, crash, kill -9) it kills the
+     agent's whole tree instead of leaving it running unobserved. *)
   let group_leader = [ "/usr/bin/perl"; "-e"; group_leader_script; "--" ] in
   (* the agent runs in its own workdir, so a relative command path is
      pinned to the gateway's directory first; bare names still go via PATH *)

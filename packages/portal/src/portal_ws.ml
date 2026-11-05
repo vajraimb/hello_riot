@@ -32,7 +32,20 @@ let track_thread = fun (state : state) ~type_ ~request_id (data : Json.t) ->
   let save () = Portal_thread.save state.threads ~path:(threads_file state) in
   match type_ with
   | "task_started" when not (String.is_empty (str "thread")) ->
-      Portal_thread.ensure state.threads ~id:(str "thread") ~title:(str "title")
+      (* the turn exists from the start, so a gateway restart can mark it
+         interrupted instead of losing it *)
+      Portal_thread.ensure state.threads ~id:(str "thread") ~title:(str "title");
+      Portal_thread.append_turn state.threads ~id:(str "thread")
+        {
+          Portal_thread.request_id;
+          prompt = str "prompt";
+          answer = "";
+          executor = "";
+          mode = str "mode";
+          status = "running";
+          finished_ms = 0;
+        };
+      save ()
   | "task_done" -> (
       match thread_of_task () with
       | None -> ()
@@ -48,6 +61,15 @@ let track_thread = fun (state : state) ~type_ ~request_id (data : Json.t) ->
               finished_ms = t.Portal_feed.finished_ms;
             };
           save ())
+  | "attempt_started" -> (
+      (* who is running it, so a follow-up after an interruption goes back
+         to the same agent *)
+      match thread_of_task () with
+      | Some t ->
+          Portal_thread.update_turn state.threads ~id:t.Portal_feed.thread ~request_id ~fn:(fun x ->
+            { x with Portal_thread.executor = str "account"; mode = t.Portal_feed.mode });
+          save ()
+      | None -> ())
   | "agent_session" -> (
       match thread_of_task () with
       | Some t when not (String.is_empty (str "session")) ->

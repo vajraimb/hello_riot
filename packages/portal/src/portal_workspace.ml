@@ -51,6 +51,14 @@ let exists = fun config ~id ->
       | Ok p -> (match Fs.is_dir p with Ok b -> b | Error _ -> false)
       | Error _ -> false)
 
+(** Deletes a task's directory; only ever a direct child of the root. *)
+let remove = fun config ~id ->
+  if exists config ~id then
+    match Path.from_string (dir_of config ~id) with
+    | Ok p -> Result.is_ok (Fs.remove_dir_all p)
+    | Error _ -> false
+  else false
+
 type entry = {
   path: string;  (** relative to the workspace *)
   size: int;

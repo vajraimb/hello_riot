@@ -123,6 +123,7 @@ let build_trail = fun (state : state) ->
           Trail.get "/api/threads" (handle_list_threads state);
           Trail.get "/api/thread" (handle_get_thread state);
           Trail.get "/api/workspace" (handle_workspace state);
+          Trail.post "/api/thread/delete" (handle_delete state);
           Trail.get "/api/workspace/file" (handle_workspace_file state);
           Trail.get "/api/alerts" (handle_list_alerts state);
           Trail.post "/api/inbox/reply" (handle_inbox_reply state);

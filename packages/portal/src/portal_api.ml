@@ -258,6 +258,53 @@ let handle_workspace_file = fun (state : state) (ctx : Trail.ctx) ->
       | Error e -> Trail.json ~status:Net.Http.Status.NotFound ctx (Json.obj [ ("error", Json.string e) ]))
   | _ -> Trail.json ~status:Net.Http.Status.BadRequest ctx (Json.obj [ ("error", Json.string "缺少 id 或 path") ])
 
+(** POST /api/thread/delete {"id": thread | "task": request id, "files": bool}:
+    removes a conversation (or a thread-less task) from the feed and from
+    threads.json; running turns are stopped first. With [files] its
+    workspace directory goes too. *)
+let handle_delete = fun (state : state) (ctx : Trail.ctx) ->
+  let body = parse_json_body ctx in
+  let config = Sync.Atomic.get state.config in
+  let str k = Json.get_field k body |> Option.and_then ~fn:Json.get_string |> Option.unwrap_or ~default:"" in
+  let files = Json.get_field "files" body |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false in
+  let thread_id = str "id" and task_id = str "task" in
+  let tasks =
+    if not (String.is_empty thread_id) then
+      List.filter (ConcurrentHashMap.values state.feed) ~fn:(fun t -> String.equal t.Portal_feed.thread thread_id)
+    else Portal_feed.find state.feed task_id |> Option.map ~fn:(fun t -> [ t ]) |> Option.unwrap_or ~default:[]
+  in
+  let thread = if String.is_empty thread_id then None else Portal_thread.get state.threads thread_id in
+  if List.is_empty tasks && Option.is_none thread then
+    Trail.json ~status:Net.Http.Status.NotFound ctx (Json.obj [ ("error", Json.string "没有这个任务") ])
+  else (
+    let stopped =
+      List.filter tasks ~fn:(fun t -> String.equal t.Portal_feed.status "running")
+      |> List.filter ~fn:(fun t -> cancel_task state ~request_id:t.Portal_feed.id ~reason:"user")
+      |> List.length
+    in
+    let ids = List.map tasks ~fn:(fun t -> t.Portal_feed.id) in
+    Portal_feed.remove_where state.feed ~fn:(fun t -> List.any ids ~fn:(String.equal t.Portal_feed.id));
+    if Option.is_some thread then (
+      ignore (Portal_thread.remove state.threads ~id:thread_id);
+      Portal_thread.save state.threads ~path:(threads_file state));
+    let workspaces =
+      (match thread with Some th when not (String.is_empty th.Portal_thread.workspace) -> [ th.Portal_thread.workspace ] | _ -> [])
+      @ List.filter_map tasks ~fn:(fun t -> if String.is_empty t.Portal_feed.workspace then None else Some t.Portal_feed.workspace)
+      |> List.unique ~compare:String.compare
+    in
+    let removed = if files then List.filter workspaces ~fn:(fun id -> Portal_workspace.remove config ~id) else [] in
+    broadcast_event state ~type_:"thread_deleted" ~request_id:""
+      ~data:(Json.obj [ ("thread", Json.string thread_id); ("tasks", Json.array (List.map ids ~fn:Json.string)) ]);
+    Trail.json ctx
+      (Json.obj
+        [
+          ("ok", Json.bool true);
+          ("tasks", Json.int (List.length ids));
+          ("stopped", Json.int stopped);
+          ("workspaces_removed", Json.array (List.map removed ~fn:Json.string));
+          ("workspaces_kept", Json.array (List.map (if files then [] else workspaces) ~fn:Json.string));
+        ]))
+
 (** POST /api/feed/cancel {"id"}: stops a running task (kills the agent
     process / drops the upstream wait); no failover, no health penalty. *)
 let handle_cancel_task = fun (state : state) (ctx : Trail.ctx) ->

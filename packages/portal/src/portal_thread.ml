@@ -68,6 +68,31 @@ let append_turn = fun (t : t) ~id (turn : turn) ->
     let others = List.filter th.turns ~fn:(fun x -> not (String.equal x.request_id turn.request_id)) in
     { th with turns = others @ [ turn ] })
 
+(** Marks turns that were still running when the gateway stopped; their
+    agents were killed with it. Returns how many. *)
+let mark_interrupted = fun (t : t) ->
+  let n = ref 0 in
+  ConcurrentHashMap.values t
+  |> List.for_each ~fn:(fun th ->
+    if List.any th.turns ~fn:(fun (x : turn) -> String.equal x.status "running") then
+      update t ~id:th.id ~fn:(fun th ->
+        {
+          th with
+          turns =
+            List.map th.turns ~fn:(fun (x : turn) ->
+              if String.equal x.status "running" then (
+                n := !n + 1;
+                { x with status = "interrupted" })
+              else x);
+        }));
+  !n
+
+let update_turn = fun (t : t) ~id ~request_id ~fn ->
+  update t ~id ~fn:(fun th ->
+    { th with turns = List.map th.turns ~fn:(fun (x : turn) -> if String.equal x.request_id request_id then fn x else x) })
+
+let remove = fun (t : t) ~id -> Option.is_some (ConcurrentHashMap.remove t ~key:id)
+
 let set_session = fun (t : t) ~id ~agent ~session ->
   update t ~id ~fn:(fun th ->
     { th with sessions = (agent, session) :: List.filter th.sessions ~fn:(fun (a, _) -> not (String.equal a agent)) })

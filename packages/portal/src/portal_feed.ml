@@ -532,3 +532,8 @@ let recent = fun (feed : t) ~limit ->
   |> List.take ~len:limit
 
 let find = fun (feed : t) id -> ConcurrentHashMap.get feed ~key:id
+
+let remove_where = fun (feed : t) ~fn ->
+  ConcurrentHashMap.values feed
+  |> List.filter ~fn
+  |> List.for_each ~fn:(fun task -> ignore (ConcurrentHashMap.remove feed ~key:task.id))

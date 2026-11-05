@@ -3900,6 +3900,81 @@ let test_agent_timeout_kills_process_tree = fun _ctx ->
           Ok ()
     )
 
+let test_agent_dies_with_gateway = fun _ctx ->
+  (* a stand-in gateway (sh) starts the group leader and exits; the leader
+     must take the agent's tree down with it *)
+  let dir = unique_dir "orphan" in
+  let _ = Fs.create_dir_all (Path.from_string dir |> Result.unwrap) in
+  let leader = Agent.absolute (dir ^ "/leader.pl") in
+  let pid_file = Agent.absolute (dir ^ "/child.pid") in
+  let _ = Fs.write Agent.group_leader_script (Path.from_string leader |> Result.unwrap) in
+  let cmd = "/usr/bin/perl " ^ leader ^ " /bin/sh " ^ fix "agent_fork.sh" ^ " " ^ pid_file ^ " & sleep 0.5" in
+  let stdio = { Process.stdin = Process.Stdin.Null; stdout = Process.Stdout.Null; stderr = Process.Stderr.Null } in
+  match Process.spawn ~program:"/bin/sh" ~args:[| "-c"; cmd |] ~stdio () with
+  | Error _ -> Error "spawn failed"
+  | Ok p -> (
+      let rec wait () = match Process.try_wait p with Ok None -> sleep (Time.Duration.from_millis 20); wait () | _ -> () in
+      wait ();
+      let _ = Process.close p in
+      sleep (Time.Duration.from_millis 1200);
+      match Fs.read_to_string (Path.from_string pid_file |> Result.unwrap) with
+      | Error _ -> Error "fixture did not record the child pid"
+      | Ok content ->
+          Test.assert_equal ~expected:false ~actual:(pid_alive (String.trim content));
+          Ok ())
+
+let test_thread_marks_interrupted_turns = fun _ctx ->
+  let t = Portal.Thread.create () in
+  Portal.Thread.ensure t ~id:"th-1" ~title:"x";
+  let turn status request_id =
+    { Portal.Thread.request_id; prompt = "p"; answer = ""; executor = "claude_code"; mode = "agent"; status; finished_ms = 0 }
+  in
+  Portal.Thread.append_turn t ~id:"th-1" (turn "ok" "r1");
+  Portal.Thread.append_turn t ~id:"th-1" (turn "running" "r2");
+  Test.assert_equal ~expected:1 ~actual:(Portal.Thread.mark_interrupted t);
+  let th = Portal.Thread.get t "th-1" |> Option.unwrap in
+  Test.assert_equal ~expected:[ "ok"; "interrupted" ] ~actual:(List.map th.Portal.Thread.turns ~fn:(fun x -> x.Portal.Thread.status));
+  (* the follow-up still knows who ran it and that it stopped midway *)
+  let msgs = Portal.Thread.history_messages th |> List.map ~fn:Json.to_string |> String.concat "" in
+  Test.assert_equal ~expected:true ~actual:(String.contains msgs "上一轮未完成");
+  Ok ()
+
+let test_gateway_delete_thread = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let m = List.get_unchecked mocks ~at:0 in
+      Mock.set_scenario m { (Mock.default_scenario) with body = openai_ok_body ~content:"a" };
+      match Gateway.start ~config_path:None ~config:(handoff_config mocks) ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          match gw_post ~port:gw.port ~path:"/v1/chat/completions" ~headers:[ ("Content-Type", "application/json") ] ~body:(chat_body "q") with
+          | Error e -> Error e
+          | Ok _ -> (
+              match latest_thread ~port:gw.port with
+              | Error e -> Error e
+              | Ok th -> (
+                  match
+                    gw_post ~port:gw.port ~path:"/api/thread/delete" ~headers:[ ("Content-Type", "application/json") ]
+                      ~body:(Json.to_string (Json.obj [ ("id", Json.string th); ("files", Json.bool true) ]))
+                  with
+                  | Error e -> Error e
+                  | Ok (status, _) -> (
+                      Test.assert_equal ~expected:200 ~actual:status;
+                      match (gw_get ~port:gw.port ~path:("/api/thread?id=" ^ th), gw_get ~port:gw.port ~path:"/api/feed?limit=50") with
+                      | (Ok (st, _), Ok (_, feed)) ->
+                          Test.assert_equal ~expected:404 ~actual:st;
+                          Test.assert_equal ~expected:false ~actual:(String.contains feed th);
+                          (match
+                             gw_post ~port:gw.port ~path:"/api/thread/delete" ~headers:[ ("Content-Type", "application/json") ]
+                               ~body:(Json.to_string (Json.obj [ ("id", Json.string th) ]))
+                           with
+                           | Ok (again, _) ->
+                               Test.assert_equal ~expected:404 ~actual:again;
+                               Ok ()
+                           | Error e -> Error e)
+                      | (Error e, _) | (_, Error e) -> Error e)))))
+
 let test_gateway_agent_runs_until_cancelled = fun _ctx ->
   let config =
     mk_config_agents
@@ -4015,6 +4090,9 @@ let tests =
     case "committee: members and feed events" test_committee_members_and_feed;
     case "gateway: committee answers and synthesis" test_gateway_committee;
     case "gateway: thread follow-up carries the conversation" test_gateway_thread_carries_history;
+    case ~size:Test.Large "agent: tree dies with the gateway" test_agent_dies_with_gateway;
+    case "thread: running turns become interrupted on restart" test_thread_marks_interrupted_turns;
+    case ~size:Test.Large "gateway: delete a conversation" test_gateway_delete_thread;
     case ~size:Test.Large "gateway: agents run in the conversation's own workspace" test_gateway_agent_runs_in_task_workspace;
     case ~size:Test.Large "gateway: thread follow-up resumes the agent session" test_gateway_thread_resumes_agent_session;
     case ~size:Test.Large "gateway: caller deadline cancels account calls without failover" test_gateway_client_deadline_accounts;

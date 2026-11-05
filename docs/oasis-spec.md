@@ -237,7 +237,7 @@ daily 语义）是**每 30s 烧一次请求并污染时延 EMA**。0.3 区分三
 | `POST /v1/chat/completions` | OpenAI 兼容（流式 SSE / 非流式）；头 `X-Oasis-Category` `X-Oasis-Goal` `X-Oasis-Mode` `X-Oasis-Session`；可选 `X-Oasis-Source`（来源标签，默认 `api`）、`X-Oasis-Client-Ref`（原样回显在 `task_started`，供控制台关联自己发起的请求）、`X-Oasis-Agent`（指定 agent）、`X-Oasis-Committee`（委员会成员，§2.4）、`X-Oasis-Thread`（续接对话，§2.6.2；响应头回传本轮所属的对话 id） |
 | `GET /v1/models` | KB 模型列表 |
 | `POST /mcp` | MCP（JSON-RPC 2.0 / Streamable HTTP 简化）11 工具：oasis_ask、oasis_agent_task、oasis_task_status、oasis_status、oasis_decisions、oasis_send_message、oasis_check_inbox、oasis_ask_user、oasis_activity、oasis_agents、oasis_models |
-| `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点 + 已配置 agent 的信号）、activity（时间线）、requests（审计）、**feed**（最近任务摘要）、**feed/task?id=**（单任务：路由说明 + 时间线 + 回答）、**threads?limit=**（最近对话摘要）、**thread?id=**（整段对话：各轮问答 + agent 会话 id；不存在 404）、**workspace?id=**（任务工作目录里的文件列表）、**workspace/file?id=&path=**（读一个产出文件，文本最多 512 KB）、**alerts**（需要处理的问题 + 可复制的修复命令） |
+| `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点 + 已配置 agent 的信号）、activity（时间线）、requests（审计）、**feed**（最近任务摘要）、**feed/task?id=**（单任务：路由说明 + 时间线 + 回答）、**threads?limit=**（最近对话摘要）、**thread?id=**（整段对话：各轮问答 + agent 会话 id；不存在 404）、**workspace?id=**（任务工作目录里的文件列表）、**workspace/file?id=&path=**（读一个产出文件，文本最多 512 KB）；`POST /api/thread/delete {"id"|"task", "files"}`（删除对话或无对话的任务，§2.6.5）、**alerts**（需要处理的问题 + 可复制的修复命令） |
 | `WS /ws` | 实时推送：decision + 事件流（task_started → routed → attempt_started → attempt_finished → **[0.3 新增]** handoff → task_done，以及 agent 的 `agent_step`） |
 | `GET /` | 控制台（§2.6）：工作台（任务列表 / 任务详情 / 需要你处理 + 资源）与诊断页（账户明细、原始决策、过程图、agent 盘点、会话活动、收件箱） |
 
@@ -298,6 +298,17 @@ agent 回答文字。路由说明与切换说明在服务端生成人话（"交�
 - 控制台：详情头部 📁 标签点一下复制目录路径；「产出 · n」页签列出文件（大小、修改时间），点文件看内容；
   任务完成时自动刷新；快捷键 `4`
 - 限制：agent 仍可以按绝对路径写到别处，目录只是默认位置，不是沙箱
+
+#### 2.6.5 网关重启与删除
+
+- agent 的进程组组长（perl）每 0.2s 检查父进程；网关一消失（重启、崩溃、kill -9）就杀掉 agent 整棵进程树，
+  不留无人看管的 agent
+- 轮次在 `task_started` 时就以 `running` 写进对话，`attempt_started` 记下执行者；网关启动时把仍是 `running`
+  的轮次标成 `interrupted`（控制台「已中断」）。续接照常交回同一个 agent 并续接它的 CLI 会话；
+  中断前的部分输出不落盘，历史里标「上一轮未完成」
+- 删除：`POST /api/thread/delete`，`id` 为对话 id（或 `task` 为无对话任务的 request id），`files: true` 时
+  连工作目录一起删（只删工作目录根下的直接子目录）。正在运行的轮次先停掉；从任务流和 `threads.json`
+  中移除，广播 `thread_deleted`，其他打开的控制台同步移除。控制台详情头部「删除」按钮，二次确认是否删产出文件
 
 #### 2.6.4 无人值守的提问
 

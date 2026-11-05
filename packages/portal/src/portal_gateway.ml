@@ -76,6 +76,7 @@ let start = fun ~config_path ?(config : Portal_config.t option) ~port () ->
       Portal_signals.load_latency state.signals ~path:(data_path state "latency.json");
       Portal_quality.load state.quality ~path:(quality_file state);
       Portal_thread.load state.threads ~path:(threads_file state);
+      if Portal_thread.mark_interrupted state.threads > 0 then Portal_thread.save state.threads ~path:(threads_file state);
       Portal_judge.start state;
       if
         String.equal config.Portal_config.policy.Portal_config.goal "cheapest"
