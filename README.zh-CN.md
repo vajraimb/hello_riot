@@ -169,6 +169,10 @@ Oasis 还很年轻，目前作为单用户、单机网关每天在用。需要�
 
 欢迎提 issue 和 pull request。
 
+## 许可证
+
+[MIT](LICENSE)。可以拿去用、改、再分发。Oasis 构建时依赖的 Riot kernel 和标准库是 Apache-2.0。
+
 ## 开发
 
 ```bash

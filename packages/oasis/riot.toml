@@ -1,6 +1,7 @@
 [package]
 name = "oasis"
 version = "0.1.0"
+license = "MIT"
 
 [lib]
 path = "src/oasis.ml"

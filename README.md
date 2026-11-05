@@ -169,6 +169,10 @@ Oasis is young and runs daily as a single-user, single-machine gateway. Things t
 
 Issues and pull requests are welcome.
 
+## License
+
+[MIT](LICENSE). Use it, change it, ship it. The Riot kernel and standard library Oasis builds against are Apache-2.0.
+
 ## Development
 
 ```bash
