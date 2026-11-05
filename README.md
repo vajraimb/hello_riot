@@ -12,27 +12,54 @@ Oasis picks the right model or agent for each request, and when an account runs 
 
 ![Oasis running a coding task with Claude Code: the routing explanation, live tool calls, and the result](docs/images/agent-task.png)
 
-## Why Oasis
+## The pain
 
-You probably have more AI than you can use: a DeepSeek key, a Kimi plan, GLM, OpenRouter credits, Perplexity, a local Ollama, plus Claude Code, Cursor and Gemini CLI on your laptop. Each one is good at different things, priced differently and rate-limited differently. So you choose by hand every time, burn a flagship model on a trivial question, and still hit a quota wall in the middle of a long answer.
+You already pay for several model accounts and a few coding agents. Using them still looks like this:
 
-Oasis sits in front of all of them and makes that choice for you, per request.
+- Every request starts with you picking the account.
+- A one-line question and a hard one go to the same flagship model, because switching is a chore.
+- The answer dies halfway when the quota runs out. You retry, and you read the first half twice.
+- The model you asked cannot touch files or run commands. The agent that can is a different app, and it never saw the question.
 
-## What you get
+## What Oasis does about it
 
-- **Set up by clicking, not by editing.** On first start Oasis finds the API keys already in your environment, tests each one against the provider, lists your local Ollama models, and detects which agent CLIs are installed and logged in. A setup page then shows what works, what is out of quota and what was rejected. Tick what you want and save. Missing a provider? Paste its key into the same page.
-- **Drop-in OpenAI-compatible API.** Point any client, SDK or chat app at `http://127.0.0.1:9899/v1`, set `model` to `auto`, and keep working. Streaming and non-streaming both work.
-- **Routing that explains itself.** Oasis classifies each task (coding, research, writing, analysis, general). It then scores every eligible account on model strengths, price, remaining budget, live latency, health, and the quality it has learned from your past results. You choose the goal: `balanced`, `fastest`, `best` or `cheapest`. Every decision, and every rejected candidate, is shown in the dashboard.
-- **Seamless handoff in the middle of a stream.** If an account hits its quota or drops the connection while streaming, Oasis continues on the next account from exactly where the text stopped, with no repeated words. Your client receives one continuous answer. This is the feature Oasis was built around, and the self-test proves it in under a second.
-- **Your local agents become workers.** Tasks that need tools, such as writing code, running commands or browsing, go to Claude Code, Cursor Agent, Gemini CLI, Kimi CLI, Grok CLI or opencode on your machine. You watch their thinking, tool calls and output live. Each conversation gets its own working directory, and follow-ups resume the agent's own session, so it remembers what it already did.
-- **Committee mode.** Send one question to up to three accounts at once and get a merged answer that shows where they agree and where they differ.
-- **A real dashboard** at `http://127.0.0.1:9899/` lists your tasks with their routing explanations, live progress and produced files. You can follow up, stop or delete from there.
-- **MCP server** at `POST /mcp`, so other agents can ask models, hand tasks to your local agents, and message each other through Oasis.
-- **Small and private.** Oasis is a single binary under 10 MB. Routing takes about 2 µs per request. All state lives in `~/.oasis` on your machine. API keys never go into the config file: they stay in your environment, or in an owner-only `~/.oasis/secrets.env` if you paste them into the setup page, and agents are started without them.
+**It chooses, on every request.** Oasis classifies the task (coding, research, writing, analysis, general) and scores each account you enabled: model strengths, price, remaining budget, live latency, health, and the quality it has learned from your earlier results. You set the goal: balanced, fastest, best, or cheapest.
+
+**A broken stream stays one answer.** If an account hits its quota or drops while writing, Oasis continues on the next account from the words already sent, without repeating them. Your client sees one continuous reply. The dashboard records the handoff. The self-test cuts a stream on purpose and checks that.
+
+**The agents already on your machine do the work that needs a machine.** Writing code, running commands, and browsing go to Claude Code, Cursor Agent, Gemini CLI, Kimi CLI, Grok CLI, or opencode. You watch the thinking and the tool calls. A follow-up resumes that agent's own session, in that conversation's directory.
+
+**The choice is on screen.** Every decision, and every account that was turned down, is in the dashboard.
+
+The first start finds the keys, Ollama models, and agent CLIs already on the computer, tests them, and opens a setup page. You tick what to keep. A key you paste goes into an owner-only file, never into the config, and it is not passed to the agents.
 
 ![Committee mode: three accounts answer and one model writes the consensus](docs/images/committee.png)
 
-## How it works
+## Ways to use it
+
+Same gateway, six doors. Examples are further down.
+
+| Door | What you do |
+|---|---|
+| Dashboard | Open `http://127.0.0.1:9899/`, type a task, watch the route and the live steps, then follow up, stop, or delete. |
+| OpenAI API | Point any SDK or chat app at `http://127.0.0.1:9899/v1` and set `model` to `auto`. Streaming and one-shot both work. |
+| Terminal | `scripts/oasis.sh ask "..." --stream`, or `scripts/oasis.sh models`. |
+| Local agent | Send `X-Oasis-Mode: agent`. Oasis picks an installed agent, or you name one with `X-Oasis-Agent`. |
+| Committee | Send `X-Oasis-Committee` with up to three accounts. One merged answer shows where they agree and where they do not. |
+| MCP | Other agents call `POST /mcp` to ask a model, hand work to your local agents, or leave a message for each other. |
+
+## Why Riot and OCaml
+
+Oasis is one native binary, under 10 MB. One process serves the API, the dashboard, the live event stream, and MCP. There is no database to run, and no language runtime to keep alive beside it. All of the state stays in `~/.oasis` on your machine.
+
+Two properties of that stack are why the hard parts are small:
+
+- Scoring a route takes about 2 µs, so every request is scored again. Oasis does not reuse a cached choice.
+- Each stream is its own actor. When an account fails mid-answer, late bytes from the old connection are dropped and the next account continues. Latency, circuit breakers, and in-flight counts live in shared concurrent maps, so the next request sees the failure.
+
+A supervision tree that restarts a crashed agent is still ahead. Today the boundary is one actor per request. [docs/oasis-spec.md](docs/oasis-spec.md) §1.4 records what is already true and what is not.
+
+## How a request moves
 
 ```mermaid
 flowchart LR
@@ -165,7 +192,7 @@ By default Oasis listens on `127.0.0.1` only. Before exposing it on a network, s
 
 Oasis is young and runs daily as a single-user, single-machine gateway. Things to know:
 
-- The dashboard and the CLI output are currently in Chinese. The API is language-neutral.
+- The dashboard and the CLI output are in Chinese. The setup page follows the browser language. The API is language-neutral.
 - Running the test suite in parallel occasionally crashes inside the Riot runtime, so run it serially (see below).
 - [docs/oasis-spec.md](docs/oasis-spec.md), written in Chinese, documents the scheduling algorithm, the handoff state machine, security boundaries, persistence semantics and known limitations in detail.
 
