@@ -47,7 +47,13 @@ flowchart LR
 
 ## Quick start
 
-You need macOS or Linux and the [Riot](https://github.com/leostera/riot) OCaml toolchain.
+Paste this to your coding agent (Cursor, Claude Code, Codex, or any agent that can run commands):
+
+> Clone https://github.com/vajraimb/oasis and follow docs/agent-setup.md until the Oasis console is open in my browser. Stop there.
+
+The agent installs the toolchain, builds, starts Oasis, and opens the console. A setup page lists what it found; you tick what you want and press Save. You do not edit a config file, and you do not paste API keys into the chat.
+
+Or do it yourself. You need macOS or Linux and the [Riot](https://github.com/leostera/riot) OCaml toolchain.
 
 ```bash
 curl -sSL https://get.riot.ml | sh                 # install Riot
@@ -179,5 +185,6 @@ packages/
 └── oasis/     the gateway: src/oasis_*.ml, tests/, bench/, examples/ (mock upstream, HTTPS probe)
 config/        oasis.example.toml, oasis-demo.toml (keyless demo against local mocks)
 scripts/       oasis.sh, build-release.sh, patch-riot.sh
+docs/          agent-setup.md is the runbook a coding agent follows to install Oasis and open the console
 patches/riot/  Riot kernel/std patches applied by CI and local builds
 ```

@@ -47,7 +47,13 @@ flowchart LR
 
 ## 快速开始
 
-需要 macOS 或 Linux，以及 [Riot](https://github.com/leostera/riot) OCaml 工具链。
+把这句话发给你的编程助手（Cursor、Claude Code、Codex，或任何能执行命令的 agent）：
+
+> Clone https://github.com/vajraimb/oasis and follow docs/agent-setup.md until the Oasis console is open in my browser. Stop there.
+
+助手会装好工具链、构建、启动，并打开控制台。配置页列出它在这台机器上测到的账户，你勾选要留下的，点保存。不用改配置文件，也不用把 API key 贴到对话里。
+
+也可以自己装。需要 macOS 或 Linux，以及 [Riot](https://github.com/leostera/riot) OCaml 工具链。
 
 ```bash
 curl -sSL https://get.riot.ml | sh                 # 安装 Riot
@@ -179,5 +185,6 @@ packages/
 └── oasis/     网关本体：src/oasis_*.ml、tests/、bench/、examples/（模拟上游、HTTPS 探针）
 config/        oasis.example.toml、oasis-demo.toml（对着本机模拟上游的无 key 演示）
 scripts/       oasis.sh、build-release.sh、patch-riot.sh
+docs/          agent-setup.md：编程助手照着做，装好 Oasis 并打开控制台
 patches/riot/  Riot kernel/std 补丁（CI 和本地构建都会打）
 ```
