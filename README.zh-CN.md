@@ -47,17 +47,19 @@ flowchart LR
 
 ## 快速开始
 
-把这句话发给你的编程助手（Cursor、Claude Code、Codex，或任何能执行命令的 agent）：
+把这段话发给你的编程助手（Cursor、Claude Code、Codex，或任何能执行命令的 agent）。助手会先读那一页，再按页面去做，克隆仓库也是其中一步：
 
-> Clone https://github.com/vajraimb/oasis and follow docs/agent-setup.md until the Oasis console is open in my browser. Stop there.
+> Read https://raw.githubusercontent.com/vajraimb/oasis/main/docs/agent-setup.md from the top and do what it says. Do not clone or install anything until that document tells you to. Stop when it says the console is open.
 
-助手会装好工具链、构建、启动，并打开控制台。配置页列出它在这台机器上测到的账户，你勾选要留下的，点保存。不用改配置文件，也不用把 API key 贴到对话里。
+一台什么都没装的机器上，助手会按 https://riot.ml 安装 Riot，再克隆本仓库、构建、启动，并打开控制台。配置页列出它在这台机器上测到的账户，你勾选要留下的，点保存。不用改配置文件，也不用把 API key 贴到对话里。
 
 也可以自己装。需要 macOS 或 Linux，以及 [Riot](https://github.com/leostera/riot) OCaml 工具链。
 
 ```bash
-curl -sSL https://get.riot.ml | sh                 # 安装 Riot
+curl -sSL https://get.riot.ml | sh                 # 安装 Riot，说明见 https://riot.ml
+export PATH="$HOME/.riot/bin:$PATH"
 git clone https://github.com/vajraimb/oasis.git && cd oasis
+riot toolchain install                             # 下载本仓库指定的 OCaml 编译器
 riot plan > /dev/null && scripts/patch-riot.sh      # 给 Riot 0.0.43 打两个运行时补丁
 riot build
 scripts/oasis.sh --self-test                        # 不需要任何 API key

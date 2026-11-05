@@ -47,17 +47,19 @@ flowchart LR
 
 ## Quick start
 
-Paste this to your coding agent (Cursor, Claude Code, Codex, or any agent that can run commands):
+Paste this to your coding agent (Cursor, Claude Code, Codex, or any agent that can run commands). The agent reads that page first and only then installs anything, including cloning this repository:
 
-> Clone https://github.com/vajraimb/oasis and follow docs/agent-setup.md until the Oasis console is open in my browser. Stop there.
+> Read https://raw.githubusercontent.com/vajraimb/oasis/main/docs/agent-setup.md from the top and do what it says. Do not clone or install anything until that document tells you to. Stop when it says the console is open.
 
-The agent installs the toolchain, builds, starts Oasis, and opens the console. A setup page lists what it found; you tick what you want and press Save. You do not edit a config file, and you do not paste API keys into the chat.
+On a machine with nothing installed, the agent follows https://riot.ml to install Riot, clones this repository, builds, starts Oasis, and opens the console. A setup page lists what it found; you tick what you want and press Save. You do not edit a config file, and you do not paste API keys into the chat.
 
 Or do it yourself. You need macOS or Linux and the [Riot](https://github.com/leostera/riot) OCaml toolchain.
 
 ```bash
-curl -sSL https://get.riot.ml | sh                 # install Riot
+curl -sSL https://get.riot.ml | sh                 # install Riot, from https://riot.ml
+export PATH="$HOME/.riot/bin:$PATH"
 git clone https://github.com/vajraimb/oasis.git && cd oasis
+riot toolchain install                             # the OCaml compiler pinned by this repo
 riot plan > /dev/null && scripts/patch-riot.sh      # two runtime fixes for Riot 0.0.43
 riot build
 scripts/oasis.sh --self-test                        # no API keys needed
