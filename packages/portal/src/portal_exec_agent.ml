@@ -190,7 +190,20 @@ let session_watch = fun (state : state) ~request_id ->
           ~data:(Json.obj [ ("agent", Json.string agent); ("session", Json.string sid) ])
     | _ -> ()
 
-let handle_chat_agent = fun ?pinned ?prefer ?thread (state : state) (ctx : Trail.ctx) (body : Json.t) ~(category : string) ~(stream_requested : bool) ~(request_id : string) ->
+(** Runs an agent that has no configured [workdir] in the task's own
+    workspace directory, and tells the feed / thread where that is. *)
+let in_workspace = fun (state : state) ~request_id ?workspace (agent : Portal_agent.agent) ->
+  match workspace with
+  | Some id when String.is_empty agent.Portal_agent.workdir -> (
+      let config = Sync.Atomic.get state.config in
+      match Portal_workspace.prepare config ~id with
+      | Error _ -> agent
+      | Ok dir ->
+          broadcast_event state ~type_:"workspace" ~request_id ~data:(Json.obj [ ("id", Json.string id); ("dir", Json.string dir) ]);
+          { agent with Portal_agent.workdir = dir })
+  | _ -> agent
+
+let handle_chat_agent = fun ?pinned ?prefer ?thread ?workspace (state : state) (ctx : Trail.ctx) (body : Json.t) ~(category : string) ~(stream_requested : bool) ~(request_id : string) ->
   audit_log state ~path:"/agent-path-enter" ~category ~goal:"-" ~stream_:stream_requested ~request_id ();
   let config = Sync.Atomic.get state.config in
   let model =
@@ -210,9 +223,12 @@ let handle_chat_agent = fun ?pinned ?prefer ?thread (state : state) (ctx : Trail
           Portal_thread.session_of th ~agent:nm
           |> Option.and_then ~fn:(fun sid -> Portal_agent.with_resume agent ~session:sid)
     in
-    match resumed with
-    | Some a -> (a, Portal_feed.last_user_text body)
-    | None -> (agent, prompt0)
+    let agent, prompt =
+      match resumed with
+      | Some a -> (a, Portal_feed.last_user_text body)
+      | None -> (agent, prompt0)
+    in
+    (in_workspace state ~request_id ?workspace agent, prompt)
   in
   audit_log
     state

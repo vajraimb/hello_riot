@@ -48,6 +48,7 @@ let bench_config =
     server_port = 0;
     data_dir = "./.oasis-bench-data";
     auth_token_env = None;
+    workspace_dir = "";
     agents = [];
     accounts =
       [

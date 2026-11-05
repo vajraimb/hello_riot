@@ -147,6 +147,15 @@ body.resizing{cursor:col-resize;user-select:none}
 .turns button.failed{border-color:rgba(248,81,73,.5)}
 .turns button.running{border-color:rgba(91,140,255,.6)}
 .nturn{font-size:10.5px;color:var(--accent2);border:1px solid rgba(91,140,255,.35);border-radius:3px;padding:0 4px;line-height:16px}
+.files .dir{display:flex;gap:8px;align-items:center;padding:10px 20px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+.files .dir .mono{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.files .f{display:flex;gap:12px;align-items:center;padding:6px 20px;font-size:12.5px;cursor:pointer;border-bottom:1px solid var(--line)}
+.files .f:hover,.files .f.on{background:var(--panel2)}
+.files .f .p{font-family:var(--mono);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.files .f .z{color:var(--muted);font-size:11.5px;flex:none}
+.fview{padding:12px 20px}
+.fview .h{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px}
+.fview pre{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-word;line-height:1.5;margin:0}
 .turnblk{border-bottom:1px solid var(--line);padding:14px 20px}
 .turnblk .meta{font-size:12px;color:var(--muted);display:flex;gap:10px;align-items:center}
 .turnblk .q{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;padding:8px 11px;white-space:pre-wrap;word-break:break-word;margin:8px 0 10px;font-size:13px}
@@ -297,7 +306,7 @@ body.resizing{cursor:col-resize;user-select:none}
       <div class="scroll" id="tasks"><div class="empty">还没有任务</div></div>
     </div>
     <div class="col" id="detail">
-      <div class="dbody" id="dbody"><div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>[</kbd> 任务栏 · <kbd>\</kbd> 侧栏 · <kbd>g</kbd> 路由说明</span></div></div>
+      <div class="dbody" id="dbody"><div class="empty" style="margin:auto">选择左侧任务查看路由说明和执行过程<br><span class="dim" style="font-size:12px">快捷键：<kbd>/</kbd> 输入 · <kbd>j</kbd><kbd>k</kbd> 切换任务 · <kbd>[</kbd> 任务栏 · <kbd>\</kbd> 侧栏 · <kbd>g</kbd> 路由说明 · <kbd>4</kbd> 产出</span></div></div>
       <div class="follow" id="followbar">
         <div class="fw"><div class="fh" id="follow-hint"></div>
           <textarea id="follow-in" rows="2" placeholder="继续这个对话：追问、补充要求，或让它接着把任务做完（⌘↵ 发送）"></textarea></div>
@@ -588,6 +597,48 @@ function selectTurn(id) {
   if (S.detailTab === 'conv') S.detailTab = 'trace';
   loadDetail(true);
 }
+function wsId() { return (S.detail && S.detail.workspace) || (S.thread && S.thread.workspace) || ''; }
+async function loadWorkspace(id) {
+  S.ws = { id, loading: true };
+  try {
+    const r = await fetch('/api/workspace?id=' + encodeURIComponent(id));
+    S.ws = r.ok ? Object.assign({ id }, await r.json()) : { id, files: [], missing: true };
+  } catch (e) { S.ws = { id, files: [], missing: true }; }
+  if (S.wsFile && S.wsFile.id !== id) S.wsFile = null;
+  renderDetail(false);
+}
+async function openFile(path) {
+  const id = S.ws && S.ws.id;
+  if (!id) return;
+  if (S.wsFile && S.wsFile.path === path) { S.wsFile = null; renderDetail(false); return; }
+  S.wsFile = { id, path, loading: true };
+  renderDetail(false);
+  try {
+    const r = await fetch('/api/workspace/file?id=' + encodeURIComponent(id) + '&path=' + encodeURIComponent(path));
+    const j = await r.json();
+    if (S.wsFile && S.wsFile.path === path) S.wsFile = Object.assign({ id, path }, r.ok ? j : { error: j.error || '读取失败' });
+  } catch (e) { S.wsFile = { id, path, error: '读取失败' }; }
+  renderDetail(false);
+}
+function fmtSize(n) { return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
+function renderFiles() {
+  const w = S.ws;
+  if (!w || w.loading) return '<div class="empty">加载产出…</div>';
+  if (w.missing) return '<div class="empty">这个任务还没有工作目录</div>';
+  const head = '<div class="dir"><span>工作目录</span><span class="mono" title="' + esc(w.dir) + '">' + esc(w.dir) + '</span>' +
+    '<span class="more" id="ws-copy" style="margin-left:auto">复制路径</span><span class="more" id="ws-reload">刷新</span></div>';
+  if (!w.files.length) return '<div class="files">' + head + '<div class="empty">agent 还没在这个目录里写文件</div></div>';
+  const f = S.wsFile;
+  const list = w.files.map(x => '<div class="f' + (f && f.path === x.path ? ' on' : '') + '" data-p="' + esc(x.path) + '"><span class="p">' + esc(x.path) + '</span><span class="z">' + fmtSize(x.size) + '</span><span class="z">' + ago(x.modified_ms) + '</span></div>').join('');
+  let view = '';
+  if (f) {
+    const body = f.loading ? '<span class="dim">读取中…</span>' : f.error ? '<span class="dim">' + esc(f.error) + '</span>' :
+      f.binary ? '<span class="dim">二进制文件（' + fmtSize(f.size) + '），不在这里预览</span>' :
+      '<pre>' + esc(f.content) + '</pre>' + (f.truncated ? '<div class="dim" style="margin-top:6px">只显示前 512 KB（共 ' + fmtSize(f.size) + '）</div>' : '');
+    view = '<div class="fview"><div class="h"><b class="mono" style="color:var(--text)">' + esc(f.path) + '</b><span class="more" id="ws-close" style="margin-left:auto">关闭</span></div>' + body + '</div>';
+  }
+  return '<div class="files">' + head + list + (w.truncated ? '<div class="dim" style="padding:8px 20px">只列出前 500 个文件</div>' : '') + '</div>' + view;
+}
 async function loadThread() {
   if (!S.selThread) { S.thread = null; return; }
   try {
@@ -699,6 +750,9 @@ function renderDetail(scrollEnd) {
   const tts = S.selThread ? ((threadRow(S.selThread) || { tasks: [] }).tasks) : [];
   const nTurns = Math.max(tts.length, S.thread ? S.thread.turns.length : 0);
   if (S.detailTab === 'conv' && nTurns < 2) S.detailTab = 'trace';
+  const ws = wsId();
+  if (S.detailTab === 'files' && !ws) S.detailTab = 'trace';
+  if (ws && (!S.ws || S.ws.id !== ws)) { S.ws = { id: ws, loading: true }; setTimeout(() => loadWorkspace(ws), 0); }
   const turnsHtml = tts.length > 1 ? '<div class="turns">轮次' + tts.map(t => '<button class="' + (t.id === d.id ? 'on ' : '') + t.status + '" title="' + esc(t.title) + '" onclick="selectTurn(\'' + esc(t.id) + '\')">' + (t.turn || '?') + '</button>').join('') + '</div>' : '';
   const ref = S.refs[d.id];
   const answer = (ref && S.localAnswers[ref]) || d.answer || '';
@@ -712,6 +766,7 @@ function renderDetail(scrollEnd) {
         '<span>' + (d.mode === 'agent' ? 'Agent' : d.mode === 'committee' ? '委员会' : '问答') + ' · ' + esc(CAT[d.category] || d.category || '通用') + '</span>' +
         '<span>耗时 <b>' + fmtDur(d.duration_ms) + '</b></span>' +
         (nSteps ? '<span>工具 <b>' + nSteps + '</b> 次</span>' : '') +
+        (d.workdir ? '<span class="mono dim" style="cursor:pointer" id="wd-chip" title="复制 agent 的工作目录：' + esc(d.workdir) + '">📁 ' + esc(d.workspace || d.workdir.split('/').pop()) + '</span>' : '') +
         '<span>来源 ' + esc(SRC[d.source] || d.source) + '</span>' +
         '<span class="mono dim" style="cursor:pointer" title="复制 request id" onclick="copy(\'' + esc(d.id) + '\')">' + esc(d.id) + '</span>' +
         (d.review_score ? '<span title="' + esc((d.reviewer || '') + '：' + (d.review_reason || '')) + '">抽检 <b>' + d.review_score + '/5</b></span>' : '') +
@@ -726,10 +781,16 @@ function renderDetail(scrollEnd) {
     '</div>' +
     '<div class="dtabs"><button class="dtab' + (S.detailTab === 'trace' ? ' on' : '') + '" data-t="trace">执行过程</button>' +
       '<button class="dtab' + (S.detailTab === 'answer' ? ' on' : '') + '" data-t="answer">输出</button>' +
-      (nTurns > 1 ? '<button class="dtab' + (S.detailTab === 'conv' ? ' on' : '') + '" data-t="conv">对话 · ' + nTurns + ' 轮</button>' : '') + '</div>' +
-    '<div class="scroll">' + (S.detailTab === 'trace' ? renderTimeline(d) : S.detailTab === 'conv' ? renderConversation(d) : renderAnswer(answer, d)) + '</div>';
+      (nTurns > 1 ? '<button class="dtab' + (S.detailTab === 'conv' ? ' on' : '') + '" data-t="conv">对话 · ' + nTurns + ' 轮</button>' : '') +
+      (ws ? '<button class="dtab' + (S.detailTab === 'files' ? ' on' : '') + '" data-t="files">产出' + (S.ws && S.ws.id === ws && S.ws.files ? ' · ' + S.ws.files.length : '') + '</button>' : '') + '</div>' +
+    '<div class="scroll">' + (S.detailTab === 'trace' ? renderTimeline(d) : S.detailTab === 'conv' ? renderConversation(d) : S.detailTab === 'files' ? renderFiles() : renderAnswer(answer, d)) + '</div>';
   if ($('route-tog')) $('route-tog').onclick = toggleRoute;
-  box.querySelectorAll('.dtab').forEach(b => b.onclick = () => { S.detailTab = b.dataset.t; if (S.detailTab === 'conv') loadThread(); renderDetail(S.detailTab !== 'answer'); });
+  if ($('wd-chip')) $('wd-chip').onclick = () => copy(d.workdir);
+  if ($('ws-copy')) $('ws-copy').onclick = () => copy(S.ws.dir);
+  if ($('ws-reload')) $('ws-reload').onclick = () => loadWorkspace(S.ws.id);
+  if ($('ws-close')) $('ws-close').onclick = () => { S.wsFile = null; renderDetail(false); };
+  box.querySelectorAll('.files .f').forEach(el => el.onclick = () => openFile(el.dataset.p));
+  box.querySelectorAll('.dtab').forEach(b => b.onclick = () => { S.detailTab = b.dataset.t; if (S.detailTab === 'conv') loadThread(); renderDetail(S.detailTab === 'trace' || S.detailTab === 'conv'); });
   box.querySelectorAll('.tool .h').forEach(h => h.onclick = () => {
     const el = h.parentElement; el.classList.toggle('open');
     if (el.classList.contains('open')) S.openTools.add(el.dataset.id); else S.openTools.delete(el.dataset.id);
@@ -888,6 +949,7 @@ function connectWs() {
         setTimeout(loadResources, 300); setTimeout(loadAlerts, 400);
         const t = S.tasks.find(x => x.id === j.request_id);
         if (t && t.thread && t.thread === S.selThread) setTimeout(loadThread, 250);
+        if (S.ws && t && (t.workspace === S.ws.id || t.thread === S.ws.id)) setTimeout(() => loadWorkspace(S.ws.id), 300);
       }
       diagOnEvent(j);
     } else if (j.type === 'decision') {
@@ -958,6 +1020,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === '2') { S.detailTab = 'answer'; renderDetail(false); }
   else if (e.key === '3' && S.selThread) { S.detailTab = 'conv'; loadThread(); renderDetail(true); }
   else if (e.key === 'g') { toggleRoute(); }
+  else if (e.key === '4' && wsId()) { S.detailTab = 'files'; renderDetail(false); }
   else if (e.key === 'r' && S.selThread) { e.preventDefault(); $('follow-in').focus(); }
 });
 

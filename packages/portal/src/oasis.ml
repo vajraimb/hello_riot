@@ -531,6 +531,7 @@ let run_self_test = fun () ->
                 server_port = 0;
                 data_dir = "./.oasis-selftest-data";
                 auth_token_env = None;
+                workspace_dir = "";
                 agents = [];
                 accounts = [ mk_account "mock_a" mock_a.pool.port; mk_account "mock_b" mock_b.pool.port ];
                 kb;

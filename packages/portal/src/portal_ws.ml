@@ -54,6 +54,12 @@ let track_thread = fun (state : state) ~type_ ~request_id (data : Json.t) ->
           Portal_thread.set_session state.threads ~id:t.Portal_feed.thread ~agent:(str "agent") ~session:(str "session");
           save ()
       | _ -> ())
+  | "workspace" -> (
+      match thread_of_task () with
+      | Some t when not (String.is_empty (str "id")) ->
+          Portal_thread.set_workspace state.threads ~id:t.Portal_feed.thread ~workspace:(str "id");
+          save ()
+      | _ -> ())
   | "committee_started" -> (
       match thread_of_task () with
       | Some t ->

@@ -416,7 +416,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
   if use_agent then
     handle_chat_agent ?pinned:pinned_agent
       ?prefer:(if String.equal last_mode "agent" && not (String.is_empty last_executor) then Some last_executor else None)
-      ?thread:prior state ctx body ~category ~stream_requested ~request_id
+      ?thread:prior ?workspace:(Portal_thread.workspace_for prior ~id:thread_id) state ctx body ~category ~stream_requested ~request_id
   else
   let decision =
     Portal_router.route_scored

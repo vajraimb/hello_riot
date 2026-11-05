@@ -511,6 +511,7 @@ let mk_config = fun ~accounts ~kb ~routes ~max_fallback ->
     server_port = 0;
     data_dir = unique_dir "gw";
     auth_token_env = None;
+    workspace_dir = "";
     accounts;
     agents = [];
     kb;
@@ -1625,7 +1626,7 @@ let mk_agent = fun ?(tier = 4) ?(command = "/bin/sh") ?(args = [ "{prompt}" ]) ?
     resume_args = [];
   }
 
-let fix = fun name -> "./packages/portal/tests/fixtures/" ^ name
+let fix = fun name -> Agent.absolute ("./packages/portal/tests/fixtures/" ^ name)
 
 let test_agent_build_args = fun _ctx ->
   let a = mk_agent ~args:[ "-p"; "--model"; "{model}"; "{prompt}" ] "x" in
@@ -1830,6 +1831,7 @@ let mk_config_agents = fun ~accounts ~kb ~routes ~max_fallback ~agents ->
     server_port = 0;
     data_dir = unique_dir "gw";
     auth_token_env = None;
+    workspace_dir = "";
     accounts;
     agents;
     kb;
@@ -3396,6 +3398,55 @@ let test_gateway_thread_resumes_agent_session = fun _ctx ->
                   Test.assert_equal ~expected:false ~actual:(String.contains second "build-it");
                   Ok ())))
 
+let test_gateway_agent_runs_in_task_workspace = fun _ctx ->
+  let config =
+    mk_config_agents ~accounts:[ mk_account "acc_api" ] ~agents:[ mk_agent ~command:(fix "agent_write.sh") ~args:[ "{prompt}" ] "agent_w" ]
+      ~kb:[ mk_kb_model "m-x" ] ~routes:[] ~max_fallback:1
+  in
+  match Gateway.start ~config_path:None ~config ~port:0 () with
+  | Error e -> Error ("gateway: " ^ e)
+  | Ok gw -> (
+      let post headers text =
+        gw_post ~port:gw.port ~path:"/v1/chat/completions" ~headers:(("Content-Type", "application/json") :: headers) ~body:(chat_body text)
+      in
+      let cwd_of body =
+        match String.split ~by:"cwd=" body with
+        | _ :: rest :: _ -> (match String.split ~by:"\\n" rest with d :: _ -> String.trim d | [] -> "")
+        | _ -> ""
+      in
+      match post [ ("X-Oasis-Agent", "agent_w") ] "write-files" with
+      | Error e -> Error e
+      | Ok (_, first) -> (
+          match latest_thread ~port:gw.port with
+          | Error e -> Error e
+          | Ok th -> (
+              let dir = cwd_of first in
+              if not (String.ends_with ~suffix:("/workspaces/" ^ th) dir) then Error ("agent ran in " ^ dir ^ ", not the workspace of " ^ th ^ ": " ^ first) else
+              match post [ ("X-Oasis-Thread", th) ] "again" with
+              | Error e -> Error e
+              | Ok (_, second) -> (
+                  (* every turn of a conversation shares the directory *)
+                  Test.assert_equal ~expected:dir ~actual:(cwd_of second);
+                  match gw_get ~port:gw.port ~path:("/api/workspace?id=" ^ th) with
+                  | Error e -> Error e
+                  | Ok (_, listing) -> (
+                      let paths =
+                        Json.from_string listing |> Result.to_option |> Option.and_then ~fn:(Json.get_field "files")
+                        |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
+                        |> List.filter_map ~fn:(fun f -> Json.get_field "path" f |> Option.and_then ~fn:Json.get_string)
+                      in
+                      Test.assert_equal ~expected:[ "notes.txt"; "src/main.ml" ] ~actual:paths;
+                      match gw_get ~port:gw.port ~path:("/api/workspace/file?id=" ^ th ^ "&path=notes.txt") with
+                      | Error e -> Error e
+                      | Ok (status, file) -> (
+                          Test.assert_equal ~expected:200 ~actual:status;
+                          Test.assert_equal ~expected:true ~actual:(String.contains file "turn\\nturn");
+                          match gw_get ~port:gw.port ~path:("/api/workspace/file?id=" ^ th ^ "&path=../../threads.json") with
+                          | Error e -> Error e
+                          | Ok (status, _) ->
+                              Test.assert_equal ~expected:404 ~actual:status;
+                              Ok ()))))))
+
 let test_upstream_body_max_tokens_passthrough = fun _ctx ->
   let messages = Json.array [] in
   let has_max b = String.contains b "max_tokens" in
@@ -3962,6 +4013,7 @@ let tests =
     case "committee: members and feed events" test_committee_members_and_feed;
     case "gateway: committee answers and synthesis" test_gateway_committee;
     case "gateway: thread follow-up carries the conversation" test_gateway_thread_carries_history;
+    case ~size:Test.Large "gateway: agents run in the conversation's own workspace" test_gateway_agent_runs_in_task_workspace;
     case ~size:Test.Large "gateway: thread follow-up resumes the agent session" test_gateway_thread_resumes_agent_session;
     case ~size:Test.Large "gateway: caller deadline cancels account calls without failover" test_gateway_client_deadline_accounts;
     case ~size:Test.Large "gateway: agents run until cancelled" test_gateway_agent_runs_until_cancelled;

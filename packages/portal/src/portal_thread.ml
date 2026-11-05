@@ -31,6 +31,7 @@ type thread = {
   turns: turn list;  (** oldest first *)
   sessions: (string * string) list;  (** agent name -> CLI session id *)
   members: string list;  (** committee members of the last committee turn *)
+  workspace: string;  (** workspace id once an agent ran here; "" = none yet *)
 }
 
 type t = (string, thread) ConcurrentHashMap.t
@@ -59,7 +60,7 @@ let ensure = fun (t : t) ~id ~title ->
     | None ->
         let now = now_ms () in
         ConcurrentHashMap.Insert
-          ({ id; title; created_ms = now; updated_ms = now; turns = []; sessions = []; members = [] }, ()))
+          ({ id; title; created_ms = now; updated_ms = now; turns = []; sessions = []; members = []; workspace = "" }, ()))
 
 let append_turn = fun (t : t) ~id (turn : turn) ->
   let turn = { turn with answer = Portal_steps.clip turn.answer max_answer } in
@@ -72,6 +73,16 @@ let set_session = fun (t : t) ~id ~agent ~session ->
     { th with sessions = (agent, session) :: List.filter th.sessions ~fn:(fun (a, _) -> not (String.equal a agent)) })
 
 let set_members = fun (t : t) ~id ~members -> update t ~id ~fn:(fun th -> { th with members })
+
+let set_workspace = fun (t : t) ~id ~workspace -> update t ~id ~fn:(fun th -> { th with workspace })
+
+(** Workspace for the next agent turn. Threads whose agents already ran
+    before workspaces existed keep running where their CLI sessions live. *)
+let workspace_for = fun (th : thread option) ~id ->
+  match th with
+  | Some th when String.is_empty th.workspace && not (List.is_empty th.sessions) -> None
+  | Some th when not (String.is_empty th.workspace) -> Some th.workspace
+  | _ -> Some id
 
 let session_of = fun (th : thread) ~agent ->
   List.find th.sessions ~fn:(fun (a, _) -> String.equal a agent) |> Option.map ~fn:(fun (_, s) -> s)
@@ -128,6 +139,7 @@ let to_json = fun (th : thread) ->
       ("turns", Json.array (List.map th.turns ~fn:turn_json));
       ("sessions", Json.obj (List.map th.sessions ~fn:(fun (a, s) -> (a, Json.string s))));
       ("members", Json.array (List.map th.members ~fn:Json.string));
+      ("workspace", Json.string th.workspace);
     ]
 
 let summary_json = fun (th : thread) ->
@@ -181,6 +193,7 @@ let of_json = fun (j : Json.t) ->
         members =
           Json.get_field "members" j |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
           |> List.filter_map ~fn:Json.get_string;
+        workspace = s j "workspace";
       }
 
 let save = fun (t : t) ~path ->

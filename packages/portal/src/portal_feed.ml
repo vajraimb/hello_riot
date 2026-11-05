@@ -38,6 +38,8 @@ type task = {
   reviewer: string;
   thread: string;
   turn: int;
+  workspace: string;  (** Oasis-assigned workspace id; "" = agent ran in its configured dir *)
+  workdir: string;
 }
 
 type t = (string, task) ConcurrentHashMap.t
@@ -78,6 +80,8 @@ let empty_task = fun id ->
     reviewer = "";
     thread = "";
     turn = 0;
+    workspace = "";
+    workdir = "";
   }
 
 (** One-line task title: the prompt with whitespace collapsed. *)
@@ -421,6 +425,8 @@ let apply_event = fun (t : task) ~type_ (data : Json.t) ->
           error;
         }
         (entry "done" [ ("ok", Json.bool ok); ("error", Json.string error) ])
+  | "workspace" ->
+      { t with workspace = str data "id" |> Option.unwrap_or ~default:""; workdir = str data "dir" |> Option.unwrap_or ~default:"" }
   | "committee_started" ->
       let members =
         Json.get_field "members" data |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
@@ -500,6 +506,8 @@ let summary_json = fun (t : task) ->
       ("review_score", Json.int t.review_score);
       ("thread", Json.string t.thread);
       ("turn", Json.int t.turn);
+      ("workspace", Json.string t.workspace);
+      ("workdir", Json.string t.workdir);
     ]
 
 let detail_json = fun (t : task) ->

@@ -122,6 +122,8 @@ let build_trail = fun (state : state) ->
           Trail.post "/api/feed/cancel" (handle_cancel_task state);
           Trail.get "/api/threads" (handle_list_threads state);
           Trail.get "/api/thread" (handle_get_thread state);
+          Trail.get "/api/workspace" (handle_workspace state);
+          Trail.get "/api/workspace/file" (handle_workspace_file state);
           Trail.get "/api/alerts" (handle_list_alerts state);
           Trail.post "/api/inbox/reply" (handle_inbox_reply state);
           Trail.ws

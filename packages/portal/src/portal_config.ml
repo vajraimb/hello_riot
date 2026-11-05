@@ -45,6 +45,7 @@ type t = {
   server_host: string;
   server_port: int;
   data_dir: string;
+  workspace_dir: string;  (** per-task agent workdirs; "" = <data_dir>/workspaces *)
   auth_token_env: string option;
   accounts: account list;
   agents: Portal_agent.agent list;
@@ -298,6 +299,10 @@ let load = fun path ->
                 field server_fields "data_dir" |> Option.and_then ~fn:Toml.get_string
                 |> Option.unwrap_or ~default:"./.oasis-data"
               in
+              let workspace_dir =
+                field server_fields "workspace_dir" |> Option.and_then ~fn:Toml.get_string
+                |> Option.unwrap_or ~default:""
+              in
               let auth_token_env =
                 field server_fields "auth_token_env" |> Option.and_then ~fn:Toml.get_string
               in
@@ -398,7 +403,7 @@ let load = fun path ->
               in
               let errors = account_errors @ kb_errors @ route_errors @ agent_errors in
               if List.is_empty errors then
-                Ok { server_host; server_port; data_dir; auth_token_env; accounts; agents; kb; policy }
+                Ok { server_host; server_port; data_dir; workspace_dir; auth_token_env; accounts; agents; kb; policy }
               else
                 Error ("config errors: " ^ String.concat "; " errors)
         )

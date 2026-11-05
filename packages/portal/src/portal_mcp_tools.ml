@@ -257,11 +257,11 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
       let mode = mcp_get_str params "mode" |> Option.unwrap_or ~default:"async" in
       let timeout_override = mcp_get_int params "timeout_s" in
       let requested_workdir = mcp_get_str params "workdir" in
-      let with_overrides (agent : Portal_agent.agent) =
+      let with_overrides ~request_id (agent : Portal_agent.agent) =
         match Portal_agent.resolve_workdir agent requested_workdir with
         | Error e -> Error e
         | Ok workdir ->
-            let agent = { agent with Portal_agent.workdir } in
+            let agent = in_workspace state ~request_id ~workspace:request_id { agent with Portal_agent.workdir } in
             Ok
               (match timeout_override with
                | Some t -> { agent with Portal_agent.timeout_s = t }
@@ -354,7 +354,7 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                     :: acc)
                     rest
               | Some agent0 -> (
-                  match with_overrides agent0 with
+                  match with_overrides ~request_id agent0 with
                   | Error e ->
                       run_sync
                         ({
@@ -450,7 +450,7 @@ let mcp_tool_agent = fun (state : state) (params : Json.t) ->
                 emit_task_done ~error:"no_agent_available" state ~request_id ~chosen:None ~attempts:0 ~ok:false;
                 Error "no_agent_available"
             | Some agent0 ->
-                match with_overrides agent0 with
+                match with_overrides ~request_id agent0 with
                 | Error e ->
                     emit_task_done ~error:e state ~request_id ~chosen:None ~attempts:0 ~ok:false;
                     Error e

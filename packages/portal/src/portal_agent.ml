@@ -222,6 +222,16 @@ if (open(my $ps, '-|', '/bin/ps', '-A', '-o', 'pid=,pgid=')) {
 }
 exit($st & 127 ? 128 + ($st & 127) : $st >> 8);|}
 
+(** [dir] against the gateway's own working directory. *)
+let absolute = fun dir ->
+  if String.starts_with ~prefix:"/" dir then dir
+  else
+    match Env.current_dir () with
+    | Ok cwd ->
+        let rel = if String.starts_with ~prefix:"./" dir then String.sub dir ~offset:2 ~len:(String.length dir - 2) else dir in
+        Path.to_string cwd ^ "/" ^ rel
+    | Error _ -> dir
+
 let spawn_proc = fun ~(agent : agent) ~args () ->
   let stdio =
     {
@@ -241,7 +251,10 @@ let spawn_proc = fun ~(agent : agent) ~args () ->
      cursor-agent's daemonized worker-server inherit stdout, and a pipe
      held open by them would block the reader forever. *)
   let group_leader = [ "/usr/bin/perl"; "-e"; group_leader_script; "--" ] in
-  let argv = ("-i" :: env_args) @ group_leader @ (agent.command :: Array.to_list args) in
+  (* the agent runs in its own workdir, so a relative command path is
+     pinned to the gateway's directory first; bare names still go via PATH *)
+  let command = if String.contains agent.command "/" then absolute agent.command else agent.command in
+  let argv = ("-i" :: env_args) @ group_leader @ (command :: Array.to_list args) in
   let args = Array.init ~count:(List.length argv) ~fn:(fun i -> List.get_unchecked argv ~at:i) in
   Process.spawn ~program:"env" ~args ?current_dir:workdir ~stdio ()
 

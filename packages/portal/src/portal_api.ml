@@ -241,6 +241,23 @@ let handle_get_thread = fun (state : state) (ctx : Trail.ctx) ->
   | Some th -> Trail.json ctx (Portal_thread.to_json th)
   | None -> Trail.json ~status:Net.Http.Status.NotFound ctx (Json.obj [ ("error", Json.string "没有这个对话") ])
 
+(** GET /api/workspace?id=: the files a task's agents produced. *)
+let handle_workspace = fun (state : state) (ctx : Trail.ctx) ->
+  let config = Sync.Atomic.get state.config in
+  match query_param ctx "id" with
+  | Some id when Portal_workspace.exists config ~id -> Trail.json ctx (Portal_workspace.listing_json config ~id)
+  | _ -> Trail.json ~status:Net.Http.Status.NotFound ctx (Json.obj [ ("error", Json.string "这个任务没有工作目录") ])
+
+(** GET /api/workspace/file?id=&path=: one produced file (text, capped). *)
+let handle_workspace_file = fun (state : state) (ctx : Trail.ctx) ->
+  let config = Sync.Atomic.get state.config in
+  match (query_param ctx "id", query_param ctx "path") with
+  | (Some id, Some path) -> (
+      match Portal_workspace.read_file config ~id ~path with
+      | Ok j -> Trail.json ctx j
+      | Error e -> Trail.json ~status:Net.Http.Status.NotFound ctx (Json.obj [ ("error", Json.string e) ]))
+  | _ -> Trail.json ~status:Net.Http.Status.BadRequest ctx (Json.obj [ ("error", Json.string "缺少 id 或 path") ])
+
 (** POST /api/feed/cancel {"id"}: stops a running task (kills the agent
     process / drops the upstream wait); no failover, no health penalty. *)
 let handle_cancel_task = fun (state : state) (ctx : Trail.ctx) ->
