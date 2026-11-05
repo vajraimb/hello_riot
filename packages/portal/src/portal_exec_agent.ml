@@ -14,6 +14,13 @@ open Portal_conductor
 
 (* ---------- agent routing and execution ---------- *)
 
+(** Agents run headless: nobody can answer an interactive question tool, so
+    questions go into the answer and the user replies in the next turn. *)
+let unattended_note =
+  "[Oasis] 你在无人值守模式下运行，没有人能实时回答，提问类工具（如 AskUserQuestion）不可用。"
+  ^ "遇到需要用户决定的事：能选合理的默认就直接选，并在最后说明你的选择；"
+  ^ "必须由用户决定的，把问题和可选项写在回答末尾，然后结束本轮——用户会在下一轮回复，你再接着做。\n\n"
+
 let agent_prompt_of_body = fun (body : Json.t) ->
   let messages =
     Json.get_field "messages" body |> Option.and_then ~fn:Json.get_array
@@ -45,7 +52,7 @@ let agent_prompt_of_body = fun (body : Json.t) ->
     if List.is_empty systems then ""
     else String.concat "\n" systems ^ "\n\n"
   in
-  system_prefix ^ String.concat "\n" rest
+  unattended_note ^ system_prefix ^ String.concat "\n" rest
 
 (** [?only] pins the pool to one agent the user picked: no exploration, no
     substitutes. *)

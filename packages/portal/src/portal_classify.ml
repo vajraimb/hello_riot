@@ -31,6 +31,12 @@ let coding_words =
     "docker"; "kubernetes"; ".py"; ".ts"; ".ml"; ".rs"; ".go"; ".js";
   ]
 
+(** Asking for something to be built: a research topic is then the domain
+    of the program ("an OCaml project comparing weather forecasts"), not a
+    question to look up. *)
+let build_words =
+  [ "建立"; "创建"; "新建"; "搭建"; "实现"; "开发"; "编写"; "写一个"; "写个"; "做一个"; "做个"; "build"; "implement"; "create a"; "write a" ]
+
 let writing_words =
   [ "写一篇"; "写一段"; "润色"; "改写"; "文案"; "邮件"; "翻译"; "作文"; "演讲稿"; "标题"; "帖子"; "proofread"; "rewrite"; "draft an" ]
 
@@ -47,7 +53,9 @@ let classify = fun (raw : string) ->
     let times = hits text time_words in
     let code = hits text coding_words in
     let asks = not (List.is_empty (hits text question_cues)) in
-    if not (List.is_empty topics && List.is_empty actions) then ("research", take (topics @ actions @ times))
+    let builds = hits text build_words in
+    if (not (List.is_empty code)) && (not (List.is_empty builds)) && List.is_empty actions then ("coding", take (builds @ code))
+    else if not (List.is_empty topics && List.is_empty actions) then ("research", take (topics @ actions @ times))
     else if (not (List.is_empty times)) && asks && List.is_empty code then ("research", take times)
     else if not (List.is_empty code) then ("coding", take code)
     else

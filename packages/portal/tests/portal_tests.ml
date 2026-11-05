@@ -1759,6 +1759,8 @@ let test_classify_prompts = fun _ctx ->
   Test.assert_equal ~expected:"coding" ~actual:(cat "这个 python 函数为什么报错");
   Test.assert_equal ~expected:"coding" ~actual:(cat "```\nlet x = 1\n```\n解释一下");
   Test.assert_equal ~expected:"coding" ~actual:(cat "现在这段代码怎么重构？");
+  Test.assert_equal ~expected:"coding" ~actual:(cat "建立ocaml代码项目用三个不同的数据源对给定地区的给定日期的天气预报进行比较汇总");
+  Test.assert_equal ~expected:"research" ~actual:(cat "帮我查一下怎么用 python 写一个天气爬虫");
   Test.assert_equal ~expected:"writing" ~actual:(cat "帮我润色这封邮件");
   Test.assert_equal ~expected:"general" ~actual:(cat "解释一下量子纠缠");
   Test.assert_equal ~expected:"general" ~actual:(cat "let me know your thoughts on stoicism");
