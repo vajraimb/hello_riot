@@ -306,7 +306,9 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
     |> Option.unwrap_or ~default:false
   in
   let model =
-    Json.get_field "model" body |> Option.and_then ~fn:Json.get_string
+    match Json.get_field "model" body |> Option.and_then ~fn:Json.get_string with
+    | Some m when not (String.is_empty m || String.equal m "auto" || String.equal m "oasis") -> Some m
+    | _ -> None
   in
   let max_tokens = Json.get_field "max_tokens" body |> Option.and_then ~fn:Json.get_int in
   let est_in = est_input_tokens body in

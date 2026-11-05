@@ -1,6 +1,7 @@
 #!/bin/sh
 # Start / stop the Oasis gateway in the background.
 #   scripts/oasis.sh start|stop|restart|status|logs
+#   scripts/oasis.sh <anything else>   runs the oasis binary with those args
 # Runtime files live in $OASIS_HOME (default ~/.oasis): oasis.toml, data/,
 # workspaces/, logs/oasis.log, oasis.pid. API keys come from the calling
 # shell's environment, so run this from a shell that has them exported.
@@ -50,5 +51,9 @@ case "$cmd" in
   restart) stop; start "$@" ;;
   status) if running; then echo "运行中 (pid $(cat "$PID_FILE"))"; else echo "未运行"; fi ;;
   logs) tail -f "$LOG" ;;
-  *) echo "用法: $0 start|stop|restart|status|logs" >&2; exit 2 ;;
+  help|-h|--help) echo "用法: $0 start|stop|restart|status|logs，其余参数原样交给 oasis（如 --self-test、ask \"你好\"、models）" ;;
+  *)
+    BIN="$(bin)"
+    if [ -z "$BIN" ]; then echo "找不到 oasis 可执行文件，先运行 riot build" >&2; exit 1; fi
+    exec "$BIN" "$cmd" "$@" ;;
 esac

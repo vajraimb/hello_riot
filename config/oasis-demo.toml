@@ -1,6 +1,6 @@
 [server]
 host = "127.0.0.1"
-port = 9899
+port = 9900
 data_dir = "~/.oasis/demo-data"
 
 [[models]]

@@ -1,0 +1,204 @@
+# Oasis example config — copy to ~/.oasis/oasis.toml and keep what you have.
+# Oasis 配置示例 —— 复制到 ~/.oasis/oasis.toml，只保留你手上有的账户和 agent。
+#
+# API keys never go in this file: each account names an environment variable
+# (api_key_env) and Oasis reads it at startup.
+# API key 只放环境变量：账户里写变量名（api_key_env），启动时读取。
+#
+# Prices are nano-dollars per token ($0.15 / 1M tokens = 150). Leave 0 if unknown;
+# cost-based routing gets more accurate once they are filled in.
+# 价格单位：每 token 的 nano-dollar（$0.15/1M tokens = 150）；不知道先填 0。
+
+[server]
+host = "127.0.0.1"
+port = 9899
+# data_dir = "~/.oasis/data"            # default / 默认
+# auth_token_env = "OASIS_AUTH_TOKEN"   # require a Bearer token; mandatory for non-loopback hosts
+
+# ---------------------------------------------------------------------------
+# Models: what each model is good at. The router scores candidates on these.
+# 模型知识库：路由按这些信息给候选打分。
+# strengths / weaknesses: coding · research · writing · analysis · general · long_doc
+# latency: fast · medium · slow
+# ---------------------------------------------------------------------------
+
+[[models]]
+name = "deepseek-chat"
+tier = 4
+strengths = ["coding", "analysis", "general"]
+weaknesses = ["long_doc"]
+context_window = 65536
+max_output = 8192
+latency = "medium"
+in_price_nano = 140
+out_price_nano = 280
+cache_hit_price_nano = 14
+
+[[models]]
+name = "sonar-pro"
+tier = 4
+strengths = ["research"]
+weaknesses = []
+context_window = 200000
+max_output = 8192
+latency = "medium"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+[[models]]
+name = "qwen3:8b"
+tier = 2
+strengths = ["general"]
+weaknesses = ["coding", "long_doc"]
+context_window = 4096
+max_output = 2048
+latency = "fast"
+in_price_nano = 0
+out_price_nano = 0
+cache_hit_price_nano = 0
+
+# ---------------------------------------------------------------------------
+# Accounts: any OpenAI-compatible endpoint, or Anthropic-style (protocol = "anthropic").
+# 账户：任何 OpenAI 兼容端点；Anthropic 风格的端点加 protocol = "anthropic"。
+# ---------------------------------------------------------------------------
+
+[[accounts]]
+name = "deepseek"
+provider = "deepseek"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+models = ["deepseek-chat"]
+enabled = true
+rpm = 60
+tpm = 100000
+daily_limit = 500
+monthly_budget_nano = 5000000000   # $5
+
+# Perplexity has built-in web search. Its endpoint has no /v1 prefix, so keep the trailing "/".
+# Perplexity 自带联网搜索；端点没有 /v1 前缀，base_url 结尾的 "/" 要保留。
+[[accounts]]
+name = "perplexity"
+provider = "perplexity"
+base_url = "https://api.perplexity.ai/"
+api_key_env = "PERPLEXITY_API_KEY"
+models = ["sonar-pro"]
+enabled = false
+rpm = 50
+tpm = 200000
+daily_limit = 200
+monthly_budget_nano = 5000000000
+
+# Local Ollama: a free, offline last resort. / 本机 Ollama：免费的离线兜底。
+[[accounts]]
+name = "ollama_local"
+provider = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+models = ["qwen3:8b"]
+enabled = false
+rpm = 0
+tpm = 0
+daily_limit = 0
+monthly_budget_nano = 0
+
+# More examples / 更多示例:
+#   OpenRouter   base_url = "https://openrouter.ai/api/v1"
+#   Kimi         base_url = "https://api.moonshot.cn/v1"
+#   GLM (Z.ai)   base_url = "https://api.z.ai/api/anthropic", protocol = "anthropic"
+
+# ---------------------------------------------------------------------------
+# Local agents: CLI tools on this machine that can use a terminal, files and the web.
+# Tasks that need tools go here. An agent that is not installed is isolated automatically.
+# 本机 agent：能用终端、文件、联网的 CLI。需要工具的任务交给它们；没装的会被自动隔离。
+# Agents must never stop to ask questions: Oasis runs them headless.
+# Agent 是无人值守运行的，参数里要关掉交互式审批和提问。
+# ---------------------------------------------------------------------------
+
+[[agents]]
+name = "claude_code"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--disallowedTools=AskUserQuestion", "{prompt}"]
+capabilities = ["terminal", "files", "web"]
+tier = 5
+strengths = ["coding", "analysis", "general"]
+latency = "slow"
+enabled = true
+
+# Run `cursor-agent login` once first. / 先在终端跑一次 `cursor-agent login`。
+[[agents]]
+name = "cursor_agent"
+command = "cursor-agent"
+args = ["-p", "--output-format", "stream-json", "--force", "--trust", "{prompt}"]
+capabilities = ["terminal", "files", "web"]
+tier = 5
+strengths = ["coding", "analysis", "general"]
+latency = "slow"
+enabled = false
+
+# Without --approval-mode yolo, headless Gemini waits forever on tool approval.
+# 不加 --approval-mode yolo，无头模式会一直卡在工具审批上。
+[[agents]]
+name = "gemini_cli"
+command = "gemini"
+args = ["--skip-trust", "--approval-mode", "yolo", "-o", "stream-json", "-p", "{prompt}"]
+capabilities = ["terminal", "files", "web"]
+tier = 4
+strengths = ["general", "writing"]
+context_window = 1000000
+latency = "medium"
+enabled = false
+env_passthrough = ["GEMINI_API_KEY"]
+
+[[agents]]
+name = "kimi_cli"
+command = "kimi"
+args = ["--print", "--output-format", "stream-json", "--yolo", "-p", "{prompt}"]
+capabilities = ["terminal", "files", "web"]
+tier = 4
+strengths = ["coding", "general", "long_doc"]
+latency = "slow"
+enabled = false
+
+[[agents]]
+name = "grok_cli"
+command = "grok"
+args = ["--always-approve", "--output-format", "streaming-json", "-p", "{prompt}"]
+capabilities = ["terminal", "files", "web"]
+tier = 4
+strengths = ["coding", "general"]
+latency = "slow"
+enabled = false
+
+[[agents]]
+name = "opencode"
+command = "opencode"
+args = ["run", "{prompt}"]
+capabilities = ["terminal", "files"]
+tier = 4
+strengths = ["coding"]
+latency = "slow"
+enabled = false
+
+# ---------------------------------------------------------------------------
+# Routes: which accounts may serve each category. / 每个类别允许哪些账户执行。
+# ---------------------------------------------------------------------------
+
+[[routes]]
+category = "general"
+accounts = ["deepseek", "perplexity", "ollama_local"]
+
+[[routes]]
+category = "coding"
+accounts = ["deepseek"]
+
+[[routes]]
+category = "research"
+accounts = ["perplexity"]
+
+[policy]
+goal = "balanced"                 # balanced · fastest · best · cheapest
+agent_categories = ["coding"]     # these categories go to local agents by default
+max_fallback = 2
+explore_every = 10                # try a less-used candidate 1 in 10 routes; 0 = off
+# judge = "deepseek:deepseek-chat"  # account:model that grades 1 in judge_every results
+# judge_every = 10

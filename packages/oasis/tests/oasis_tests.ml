@@ -3569,6 +3569,31 @@ let test_gateway_quota_parks_across_restart = fun _ctx ->
         )
     )
 
+let test_gateway_model_auto_routes = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let config = { (handoff_config mocks) with Config.data_dir = unique_dir "model-auto" } in
+      Mock.set_scenario (nth_mock mocks 0) { (Mock.default_scenario) with body = openai_ok_body ~content:"routed" };
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw ->
+          let post ~model =
+            gw_post ~port:gw.port ~path:"/v1/chat/completions"
+              ~headers:[ ("Content-Type", "application/json") ]
+              ~body:("{\"model\":\"" ^ model ^ "\",\"messages\":[{\"role\":\"user\",\"content\":\"q\"}]}")
+          in
+          let routed ~model =
+            match post ~model with
+            | Ok (200, body) -> String.contains body "routed"
+            | _ -> false
+          in
+          Test.assert_equal ~expected:true ~actual:(routed ~model:"auto");
+          Test.assert_equal ~expected:true ~actual:(routed ~model:"oasis");
+          Test.assert_equal ~expected:false ~actual:(routed ~model:"not-configured");
+          Ok ()
+    )
+
 (* ---------- spec 0.3 §5.1: bearer auth ---------- *)
 
 let test_gateway_bearer_auth = fun _ctx ->
@@ -4148,6 +4173,7 @@ let tests =
     case "signals: quota reset dates" test_signals_quota_reset_at;
     case "signals: parked persistence roundtrip" test_signals_parked_roundtrip;
     case ~size:Test.Large "gateway: quota 429 parks the account across restarts" test_gateway_quota_parks_across_restart;
+    case ~size:Test.Large "gateway: model \"auto\" / \"oasis\" lets Oasis route" test_gateway_model_auto_routes;
     case ~size:Test.Large "gateway: bearer auth on /v1, /api, /mcp, /ws" test_gateway_bearer_auth;
     case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 405" test_gateway_loopback_guards;
     case ~size:Test.Large "gateway: decisions.jsonl survives a restart" test_gateway_decisions_survive_restart;
