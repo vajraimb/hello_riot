@@ -17,19 +17,19 @@ When an account runs out of quota halfway through an answer, it hands the stream
 
 ## Five things it takes on
 
-### 🗂️ One desk for every account
+### 🗂️ Manage as one
 
 > Accounts live in separate consoles, separate CLIs, and a pile of environment variables.
 
 One local process gathers the API accounts and the local agents into one config and one setup page. The first start finds the keys, the running Ollama, and the installed agents, tests each one, and marks it ✅ working, ⏳ out of quota, or 🚫 rejected or unreachable. You tick what stays. 🔑 Keys stay in the environment, or in an owner-only `secrets.env`. They are not written into the config, and they are not passed to agents.
 
-### 👀 One view of every task
+### 👀 See as one
 
 > The work is scattered across chat windows, and afterwards you cannot see why that path was taken.
 
 The dashboard gathers a task into one place: the routing explanation, the live steps, the files it produced, the follow-up, and the stop button. If the account changes halfway through a stream, you still read one answer, and the switch is recorded on that task. The self-test cuts a stream on purpose and checks that no words were repeated.
 
-### 🎯 A free hand with agents
+### 🎯 Choose freely
 
 > Each agent is its own app. A task is locked inside one, or you change windows yourself.
 
@@ -37,13 +37,13 @@ Let Oasis choose, or name an agent, or name a model. Ask a question, or send the
 
 ![Three accounts answer, then one reply marks where they agree and where they do not](docs/images/committee.png)
 
-### 💰 Spend you can read
+### 💰 Spend clearly
 
 > What this month cost, and what each provider has left, means opening each billing page.
 
 Every account shows this month's spend next to its monthly budget. Every routing decision writes the cost term beside fit, speed, and load. With the goal set to cheapest, cost is seventy percent of the score. A daily cap, a per-minute limit, or a monthly budget is a hard stop: an account past it is not chosen. A model with no price yet keeps a neutral cost term, so it is not preferred for being free.
 
-### 🧩 Add the next one yourself
+### 🧩 Expand freely
 
 > A new provider or a new agent usually means another tool.
 
