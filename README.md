@@ -12,32 +12,23 @@ Oasis picks the right model or agent for each request, and when an account runs 
 
 ![Oasis running a coding task with Claude Code: the routing explanation, live tool calls, and the result](docs/images/agent-task.png)
 
-## The pain
+## Five things it takes on
 
-You already pay for several model accounts and a few coding agents. Using them still looks like this:
+**One desk for every account.** Accounts live in separate consoles, separate CLIs, and a pile of environment variables. Oasis gathers the API accounts and the local agents into one config and one setup page. The first start finds the keys, the running Ollama, and the installed agents, tests each one, and marks it working, out of quota, rejected, or unreachable. You tick what stays. Keys stay in the environment, or in an owner-only `secrets.env`. They are not written into the config, and they are not passed to agents.
 
-- Every request starts with you picking the account.
-- A one-line question and a hard one go to the same flagship model, because switching is a chore.
-- The answer dies halfway when the quota runs out. You retry, and you read the first half twice.
-- The model you asked cannot touch files or run commands. The agent that can is a different app, and it never saw the question.
+**One view of every task.** The work is scattered across chat windows and agent apps, and afterwards you cannot see why that path was taken. The dashboard gathers a task into one place: the routing explanation, the live steps, the files it produced, the follow-up, and the stop button. If the account changes halfway through a stream, you still read one answer, and the switch is recorded on that task. The self-test cuts a stream on purpose and checks that no words were repeated.
 
-## What Oasis does about it
+**A free hand with agents.** Each agent is its own app. A task is locked inside one of them, or you change windows yourself. Here you can let Oasis choose, or name an agent, or name a model. You can ask a question, or send the work to a local agent that edits files and runs commands. Up to three accounts can answer the same question, and one merged reply shows where they agree and where they do not. The goal can be balanced, fastest, best, or cheapest. A follow-up resumes that agent's own session, in that conversation's directory.
 
-**It chooses, on every request.** Oasis classifies the task (coding, research, writing, analysis, general) and scores each account you enabled: model strengths, price, remaining budget, live latency, health, and the quality it has learned from your earlier results. You set the goal: balanced, fastest, best, or cheapest.
+**Spend you can read.** What this month cost, and what each provider has left, means opening each provider's billing page. In the dashboard every account shows this month's spend next to its monthly budget. Every routing decision writes the cost term beside fit, speed, and load. With the goal set to cheapest, cost is seventy percent of the score. A daily cap, a per-minute limit, or a monthly budget is a hard stop: an account past it is not chosen. A model with no price yet keeps a neutral cost term, so it is not preferred for being "free".
 
-**A broken stream stays one answer.** If an account hits its quota or drops while writing, Oasis continues on the next account from the words already sent, without repeating them. Your client sees one continuous reply. The dashboard records the handoff. The self-test cuts a stream on purpose and checks that.
-
-**The agents already on your machine do the work that needs a machine.** Writing code, running commands, and browsing go to Claude Code, Cursor Agent, Gemini CLI, Kimi CLI, Grok CLI, or opencode. You watch the thinking and the tool calls. A follow-up resumes that agent's own session, in that conversation's directory.
-
-**The choice is on screen.** Every decision, and every account that was turned down, is in the dashboard.
-
-The first start finds the keys, Ollama models, and agent CLIs already on the computer, tests them, and opens a setup page. You tick what to keep. A key you paste goes into an owner-only file, never into the config, and it is not passed to the agents.
+**Add the next one yourself.** A new provider or a new agent usually means another tool. In Oasis an account is an OpenAI-compatible endpoint or an Anthropic endpoint, and an agent is a local command. The built-in 13 providers and 6 agents are ready-made entries. Paste a key on the setup page, or add a block to the config, and you have one more. Other programs can also connect over MCP to ask a model or hand off a task.
 
 ![Committee mode: three accounts answer and one model writes the consensus](docs/images/committee.png)
 
 ## Ways to use it
 
-Same gateway, six doors. Examples are further down.
+The five above are what Oasis takes on. Below is where you walk into the same gateway. Examples follow.
 
 | Door | What you do |
 |---|---|
