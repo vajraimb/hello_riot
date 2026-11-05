@@ -3,8 +3,9 @@ _build/
 # fake home (registry/toolchains)
 .fakehome/
 packages/*/.fakehome/
-# runtime data
+# runtime data lives in ~/.oasis; these are local leftovers / test dirs
 .oasis-data/
+oasis.toml
 .oasis-test-data/
 packages/*/.oasis-test-data/
 .oasis-demo-data/

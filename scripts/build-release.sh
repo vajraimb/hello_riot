@@ -9,13 +9,13 @@ cd "$ROOT"
 # 沙箱下 riot 需要写 ~/.riot；用工作区内 HOME 副本
 export HOME="$ROOT/.fakehome"
 
-echo "[1/3] release 构建 (portal)..."
-riot build --release -p portal
+echo "[1/3] release 构建 (oasis)..."
+riot build --release -p oasis
 
 mkdir -p dist
-BIN_DIR="_build/release/$(uname -m)-$(uname -s | tr '[:upper:]' '[:lower:]')/out/portal"
+BIN_DIR="_build/release/$(uname -m)-$(uname -s | tr '[:upper:]' '[:lower:]')/out/oasis"
 if [ ! -d "$BIN_DIR" ]; then
-  BIN_DIR="$(find _build/release -type d -name portal -path '*out*' | head -1)"
+  BIN_DIR="$(find _build/release -type d -name oasis -path '*out*' | head -1)"
 fi
 
 echo "[2/3] 拷贝二进制 -> dist/"

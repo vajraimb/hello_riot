@@ -1,9 +1,8 @@
 [workspace]
-name = "hello_riot"
+name = "oasis"
 members = [
-  "packages/hello_riot",
-  "packages/app",
-  "packages/portal",
+  "packages/net",
+  "packages/oasis",
 ]
 
 [dependencies]

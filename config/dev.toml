@@ -1,7 +1,0 @@
-[app]
-name = "hello_riot"
-log_level = "info"
-
-[[log.handler]]
-type = "stdout"
-format = "full"

@@ -1,9 +1,0 @@
-[package]
-name = "hello_riot"
-version = "0.1.0"
-
-[lib]
-path = "src/hello_riot.ml"
-
-[dependencies]
-std = "*"

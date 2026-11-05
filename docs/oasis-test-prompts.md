@@ -3,8 +3,8 @@
 先用 `oasis.toml` 起服务。dashboard 地址是 http://127.0.0.1:9899/ ，建议开着它看过程图和决策日志。
 
 ```bash
-_build/debug/x86_64-unknown-linux-gnu/out/portal/oasis --config oasis.toml
-# macOS (Apple Silicon): _build/debug/aarch64-apple-darwin/out/portal/oasis --config oasis.toml
+_build/debug/x86_64-unknown-linux-gnu/out/oasis/oasis --config oasis.toml
+# macOS (Apple Silicon): _build/debug/aarch64-apple-darwin/out/oasis/oasis --config oasis.toml
 ```
 
 ## 一、路由与流式（直接调 API）
@@ -115,8 +115,8 @@ curl http://127.0.0.1:9899/v1/chat/completions -H 'Content-Type: application/jso
 真实上游很少会中途断流，所以第 2 条不一定能看到 handoff。要稳定复现，可以跑自动测试，它们用的是会断流的 mock 账户：
 
 ```bash
-riot build -p portal --tests
-T=_build/debug/x86_64-unknown-linux-gnu/out/portal/portal_tests   # macOS: aarch64-apple-darwin
+riot build -p oasis --tests
+T=_build/debug/x86_64-unknown-linux-gnu/out/oasis/oasis_tests   # macOS: aarch64-apple-darwin
 $T run-tests "H"
 $T run-tests "ws:"
 ```

@@ -80,12 +80,12 @@ Oasis 要解决的四件事：
 ┌─────────────────────────────────────────────────────┐
 │  客户端层: OpenAI 兼容 API · MCP 客户端 · Dashboard  │
 ├─────────────────────────────────────────────────────┤
-│  Oasis 网关 (portal_gateway.ml)                      │
+│  Oasis 网关 (oasis_gateway.ml)                      │
 │   ├─ HTTP 路由 (Trail)      ├─ MCP 端点 (/mcp)       │
 │   ├─ 流式导体 (无缝切换)     ├─ WS 实时事件广播        │
 │   ├─ 账户执行路径            ├─ Agent 执行路径        │
 ├─────────────────────────────────────────────────────┤
-│  核心域模块 (portal_*.ml)                            │
+│  核心域模块 (oasis_*.ml)                             │
 │   Router(评分) Signals(熔断) KB(fit) Ledger(记账)    │
 │   Session(粘性) Handoff(去重拼接) Inbox(总线)        │
 │   Agent(子进程) Anthropic(协议适配) Task(异步句柄)   │
@@ -96,9 +96,9 @@ Oasis 要解决的四件事：
 └─────────────────────────────────────────────────────┘
 ```
 
-**结构债**（0.2）：`portal_gateway.ml` 约 3200 行，占 portal 代码 43%，同时承载流式导体、账户执行、
+**结构债**（0.2）：`oasis_gateway.ml` 约 3200 行，占网关代码 43%，同时承载流式导体、账户执行、
 agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS。它是最难单测的模块。
-**[0.3]** 已按 §7 拆分，`portal_gateway.ml` 剩约 100 行；上图中的"网关"指拆分后的模块集合。
+**[0.3]** 已按 §7 拆分，`oasis_gateway.ml` 剩约 100 行；上图中的"网关"指拆分后的模块集合。
 
 ### 2.2 核心概念
 
@@ -127,7 +127,7 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 硬约束之外还有**粘性会话**（`X-Oasis-Session` 头的多轮对话钉在同一账户）与
 **显式模式**（`X-Oasis-Mode: agent|chat` 覆盖类别默认规则）。
 
-**类别自动判定**（`Portal_classify`）：请求未带 `X-Oasis-Category`（或值为 `auto`；MCP `oasis_ask`
+**类别自动判定**（`Oasis_classify`）：请求未带 `X-Oasis-Category`（或值为 `auto`；MCP `oasis_ask`
 未传 category 同理）时，按最后一条用户消息的关键词判定类别：含代码块 → coding；命中实时信息主题
 （天气、新闻、股价、汇率、最新版本…）或检索动作（查一下、搜索、URL…）→ research；时间词（今天、后天、
 最新…）+ 疑问且无代码迹象 → research；再依次 coding、writing，否则 general。判定结果与命中词随
@@ -148,11 +148,11 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 
 #### 2.3.3 学习质量与探索
 
-**质量**（`Portal_quality`，按「执行者 × 类别」累积 0–100 分，持久化 `.oasis-data/quality.json`）：
+**质量**（`Oasis_quality`，按「执行者 × 类别」累积 0–100 分，持久化 `~/.oasis/data/quality.json`）：
 
 - 来源一：控制台对成功任务点 👍（100）/ 👎（0），`POST /api/feed/rate {"id", "rating": 1|-1|0}`；
   改评价会先撤回旧的那次，0 = 撤销。
-- 来源二：抽检评审（`Portal_judge`，独立 actor，每 5s 扫一次任务流）：每 `policy.judge_every`（默认 10）个
+- 来源二：抽检评审（`Oasis_judge`，独立 actor，每 5s 扫一次任务流）：每 `policy.judge_every`（默认 10）个
   成功且有问题/回答文本的任务抽 1 个，交 `policy.judge`（`账户` 或 `账户:模型`，本机为
   `deepseek_pro:deepseek-flash`）打 1–5 分（映射 0/25/50/75/100），理由写进任务时间线。执行者是评审账户本身
   时跳过、顺延给下一个。留空 `judge` 即关闭。
@@ -170,7 +170,7 @@ agent 执行、HTTP 路由、WS 广播、MCP 分发和内嵌 dashboard HTML/JS�
 **[已修正]** 账户池时延分改为候选内相对分：`100 × 最快者 EMA / 本账户 EMA`（同速 100、慢一倍 50、
 慢十倍 10）；EMA 为端到端耗时（流式按整段 leg），首个样本直接作为初值，**无样本时记中性 50**
 （原先默认 800ms 让没用过的账户白拿 60 分、用过的全归零）。"空回答"的耗时也计入 EMA（不计错误）。
-EMA 与样本数持久化到 `.oasis-data/latency.json`（每个 `task_done` 写一次，启动加载）。
+EMA 与样本数持久化到 `~/.oasis/data/latency.json`（每个 `task_done` 写一次，启动加载）。
 `best` 权重由 70/10/10/10 调为 60/10/20/10：同速时强模型胜，慢几十倍时让位。
 每个候选的四项分量（fit/cost/speed/load、EMA、样本数、权重）随 `routed` 事件的 `candidates[].parts`
 与 decision 的 `scores[].parts` 下发，控制台路由说明写出算式。以下为历史记录：
@@ -198,7 +198,7 @@ EMA 与样本数持久化到 `.oasis-data/latency.json`（每个 `task_done` 写
   推理模型的 `reasoning_content`（OpenRouter 为 `reasoning`）不进回答，按 ~240 字一批作为 `agent_step`
   的 `thinking` 步骤推到控制台时间线。`max_tokens` 只转发客户端给的值，Oasis 自己不设上限（控制台、CLI、MCP 都不再默认填）；
   Anthropic 协议必须带该字段，客户端没给时用 KB 中该模型的 `max_output`
-- **流式（agent）**：子进程 stdout 逐行 → `Portal_steps.parse` 把 claude / cursor-agent / gemini / kimi / grok
+- **流式（agent）**：子进程 stdout 逐行 → `Oasis_steps.parse` 把 claude / cursor-agent / gemini / kimi / grok
   的 JSON 事件流解析成工作步骤（`thinking` / `text` / `tool` / `tool_result` / `usage`），非 JSON 行与未知 CLI
   按纯文本处理。只有 `text` 进入客户端 delta（末尾 `result` 是全文重复，丢弃；整条消息之间、工具调用后续写的
   文字之间插空行）；思考与工具步骤**不进回答**，作为 `agent_step` 事件广播给控制台（§2.6）。
@@ -228,7 +228,7 @@ daily 语义）是**每 30s 烧一次请求并污染时延 EMA**。0.3 区分三
 | **quota**（配额/余额） | HTTP 429 且 body 含 `1113` / `insufficient_quota` / `balance` / `credit`；HTTP 402；provider 自定义码表（配置 `quota_error_codes`） | `parked_until` = 下一 UTC 日 00:00（日配额）或下月 1 日（月预算，由错误文本/配置决定，默认日）；停牌期间视为硬约束不通过，reject 原因 `quota_parked`；不计入时延 EMA |
 | **client**（请求本身错） | 4xx 非 429/402（400 参数错、401/403 密钥错、413 过长） | 不触发熔断；401/403 额外写 `auth_invalid` 信号并在 `/api/accounts` 显示；不进入回退链（换账户也会失败的错误除外：413 可回退到更大 context 的账户） |
 
-识别函数 `Portal_signals.classify_error : status:int option -> body:string -> error_class` 为纯函数、可单测。
+识别函数 `Oasis_signals.classify_error : status:int option -> body:string -> error_class` 为纯函数、可单测。
 
 ### 2.5 对外接口
 
@@ -245,7 +245,7 @@ daily 语义）是**每 30s 烧一次请求并污染时延 EMA**。0.3 区分三
 
 ### 2.6 控制台与任务流
 
-`Portal_feed` 在 `broadcast_event` 处把每个事件折叠进按 `request_id` 的任务记录（内存，保留最近 200 条，
+`Oasis_feed` 在 `broadcast_event` 处把每个事件折叠进按 `request_id` 的任务记录（内存，保留最近 200 条，
 重启清空）：标题（最后一条 user 消息，折叠空白）、来源（api / mcp / dashboard）、执行者、状态、时间线、
 agent 回答文字。路由说明与切换说明在服务端生成人话（"交给 agent X：编程任务里适配分最高（200）；备选…；
 排除 Y（熔断中）"；handoff 按 G1/G2/G3 说明是无缝续写、去重续写还是重新生成），错误串翻译成可行动的
@@ -265,7 +265,7 @@ agent 回答文字。路由说明与切换说明在服务端生成人话（"交�
 
 #### 2.6.2 连续对话（thread）
 
-每个请求都属于一个对话（`Portal_thread`）：没带 `X-Oasis-Thread` 时新建（`th-…`），带了就作为下一轮追加。
+每个请求都属于一个对话（`Oasis_thread`）：没带 `X-Oasis-Thread` 时新建（`th-…`），带了就作为下一轮追加。
 `task_done` 时把本轮（问题、回答前 20000 字、执行者、模式、状态）写入对话并落盘 `data_dir/threads.json`
 （保留最近 300 个，重启后仍可续接）。
 
@@ -286,7 +286,7 @@ agent 回答文字。路由说明与切换说明在服务端生成人话（"交�
 #### 2.6.3 任务工作目录（workspace）
 
 没有配置 `workdir` 的 agent 不在网关目录里执行，而在任务自己的目录 `<workspace_dir>/<id>` 里执行
-（默认 `<data_dir>/workspaces`）：对话里的 agent 轮用对话 id，同一对话的每一轮共用一个目录，
+（默认 `~/.oasis/workspaces`；显式设了 `data_dir` 而没设 `workspace_dir` 时为 `<data_dir>/workspaces`）：对话里的 agent 轮用对话 id，同一对话的每一轮共用一个目录，
 续接时 agent 能接着改上一轮的文件；MCP 的 agent 任务用 request id。
 
 - 配置了 `workdir` 的 agent、MCP 调用显式给了 `workdir` 的，照旧用指定目录
@@ -333,7 +333,8 @@ spec 只约束**语义**：
 ### 2.7 配置（oasis.toml）
 
 ```toml
-[server]          # host / port / data_dir / [0.3] auth_token_env / workspace_dir（agent 任务目录，默认 <data_dir>/workspaces）
+[server]          # host / port / data_dir（默认 ~/.oasis/data）/ [0.3] auth_token_env / workspace_dir（默认 ~/.oasis/workspaces）
+                  # 路径支持 ~/ 写法；配置文件默认 $OASIS_HOME/oasis.toml（即 ~/.oasis/oasis.toml），首次运行自动生成
 [[models]]        # KB：name/tier/strengths/weaknesses/context/max_output/latency/价格(nano)
 [[accounts]]      # 见 2.2；protocol="anthropic" 走适配器；thinking="disabled" 关思考
                   # [0.3] supports_prefill = true|false（默认 anthropic=true, openai=false）
@@ -401,7 +402,7 @@ stateDiagram-v2
     Failed_leg --> Handoff_init: sent_text 非空 且 handoffs < max 且 回退账户 prefill 可用
     Failed_leg --> Restart_notice: sent_text 非空 且 回退账户 prefill 不可用 (G3)
     Failed_leg --> Failed: 回退链耗尽 或 handoffs >= max (G0)
-    Handoff_init --> Streaming: 带 assistant 前缀发起 leg N+1；Portal_handoff.init(sent_text)
+    Handoff_init --> Streaming: 带 assistant 前缀发起 leg N+1；Oasis_handoff.init(sent_text)
     Restart_notice --> Streaming: 发切换提示 delta；sent_text 清空；leg N+1
     Done --> [*]
     Failed --> [*]
@@ -409,7 +410,7 @@ stateDiagram-v2
 
 旧 leg 的迟到消息由 `leg_id` 选择器丢弃；`receive` 超时 120s 视为 `Upstream_failed`。
 
-### 3.4 去重器（Portal_handoff）规格
+### 3.4 去重器（Oasis_handoff）规格
 
 当前实现是逐字节匹配：匹配中累加 `match_pos`，第一个不匹配字节起 `diverged=true` 全量转发。
 0.3 补三条：
@@ -443,9 +444,9 @@ WS 事件流新增 `handoff` 事件，payload 同上一条。
 - 若失败类别为 quota（§2.4.1），pin 迁移且原账户进入停牌，后续轮次不会再回到它
 - 若为 transient，pin 迁移；原账户熔断恢复后**不**自动迁回（避免同一会话在两个模型间来回跳）
 
-### 3.6 验收测试（基于 Portal_mock，必须全部通过）
+### 3.6 验收测试（基于 Oasis_mock，必须全部通过）
 
-`portal_mock` 已支持 `cut_after_bytes` 断流与 429 场景。0.3 要求以下用例进入 `portal_tests.ml`：
+`oasis_mock` 已支持 `cut_after_bytes` 断流与 429 场景。0.3 要求以下用例进入 `oasis_tests.ml`：
 
 | 用例 | 场景 | 断言 |
 |---|---|---|
@@ -461,7 +462,7 @@ WS 事件流新增 `handoff` 事件，payload 同上一条。
 注（H2）：区分"直接续写"与"重新作答"需要启发式：直接续写时回退输出的前若干字节与
 `sent_text` **末尾**衔接自然（无法纯文本判定），而重新作答通常以与 `sent_text` **开头**相似但不等的
 文本开始。0.3 的规则：分叉在 `match_pos == 0` 且回退输出前 32 字节与 `sent_text` 前 32 字节的
-编辑距离 > 16 → 直接续写（G1）；否则 → 重新作答（G3）。该启发式作为 `Portal_handoff.classify`
+编辑距离 > 16 → 直接续写（G1）；否则 → 重新作答（G3）。该启发式作为 `Oasis_handoff.classify`
 纯函数实现并单测。
 
 ---
@@ -475,7 +476,7 @@ WS 事件流新增 `handoff` 事件，payload 同上一条。
    （已通过 `enabled=false` 隔离，修好即可用）
 2. **riot 工具链缓存坑**：lib 改动后 `riot test`/`riot run` 可能跑旧产物，
    **改 lib 后必须 `riot clean --force` 重建**；启动网关用
-   `_build/.../out/portal/oasis` 正规产物
+   `_build/.../out/oasis/oasis` 正规产物
 3. GLM 账户余额不足（z.ai 429/1113）时由停牌机制（§2.4.1）隔离；ZCode 的 bigmodel 登录态
    不落盘，无法直接复用（z.ai anthropic 端点是可用路径）
 
@@ -500,7 +501,7 @@ WS 事件流新增 `handoff` 事件，payload 同上一条。
    | 同上 ③ | `step_process` 中 `has_messages && try_mark_runnable…`：`Kernel.(&&)` 是普通函数、不短路，无消息时也把 `Waiting_message` 翻成 `Runnable` 却不入队 | 进程停在 `Runnable` 但不在任何队列 |
    | 同上 ④ | 定时器轮 `tick` 把 `current_time` 直接设为 `now`，丢弃不足一格的余量；`calculate_slot` 可能把定时器放进已处理的当前格 | reactor 循环快于一格时轮子冻结；短定时器晚一整圈触发 |
 
-   修复后 `riot test`（默认并行）连续 3 次 86/86，`portal_tests --concurrency 4/8/16` 共 60 次 0 挂起
+   修复后 `riot test`（默认并行）连续 3 次 86/86，`oasis_tests --concurrency 4/8/16` 共 60 次 0 挂起
    （修复前 4 并发约 15–30% 挂起）。补丁应同步上游；升级 Riot 版本时须重新核对
 
 ### 4.3 数据类
@@ -568,7 +569,7 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 
 - `/api/requests` 审计记录**不含**消息正文：`ts/path/category/goal/stream/request_id/body_len/body_hash8`
   （FNV-1a 32 位）。账户与状态在 decision 里，用 `request_id` 关联
-- 进入 decision、signals.last_error、dashboard 的错误文本统一经 `Portal_signals.redact_secrets`：
+- 进入 decision、signals.last_error、dashboard 的错误文本统一经 `Oasis_signals.redact_secrets`：
   `Bearer <token>` → `Bearer ****`，`sk-` 开头且 ≥ 8 字符的串 → `sk-****`
 
 ---
@@ -589,35 +590,35 @@ Oasis 是一个能 spawn `claude --dangerously-skip-permissions` 的 HTTP 服务
 
 ---
 
-## 7. 结构演进：拆分 portal_gateway.ml
+## 7. 结构演进：拆分 oasis_gateway.ml
 
 按职责拆为（纯重构，行为不变，每步可独立合并）：
 
 | 新模块 | 从 gateway 迁出 | 可测性 |
 |---|---|---|
-| `portal_conductor.ml` | 流式导体状态机（§3.3）、handoff 编排 | 用 mock 上游驱动，§3.6 用例在此跑 |
-| `portal_exec_account.ml` | 非流式账户执行、回退链循环 | mock 429/5xx |
-| `portal_exec_agent.ml` | agent 子进程驱动、stream-json 解析、心跳 | 用 `echo`/脚本假 agent |
-| `portal_http.ml` | Trail 路由、/v1 /api /mcp 分发、鉴权中间件（§5.1） | 请求级单测 |
-| `portal_ws.ml` | WS 连接管理、事件广播 | — |
-| `portal_dashboard.ml` | 内嵌 HTML/JS 字符串 | 无逻辑 |
+| `oasis_conductor.ml` | 流式导体状态机（§3.3）、handoff 编排 | 用 mock 上游驱动，§3.6 用例在此跑 |
+| `oasis_exec_account.ml` | 非流式账户执行、回退链循环 | mock 429/5xx |
+| `oasis_exec_agent.ml` | agent 子进程驱动、stream-json 解析、心跳 | 用 `echo`/脚本假 agent |
+| `oasis_http.ml` | Trail 路由、/v1 /api /mcp 分发、鉴权中间件（§5.1） | 请求级单测 |
+| `oasis_ws.ml` | WS 连接管理、事件广播 | — |
+| `oasis_dashboard.ml` | 内嵌 HTML/JS 字符串 | 无逻辑 |
 
 拆分顺序：先 conductor（为 §3 验收测试铺路），再 http（为 §5 鉴权铺路），其余随需。
 
-**实际拆分**（0.3 已完成，`portal_gateway.ml` 剩 `start` 与 3 个对外别名，约 100 行）：除上表 6 个外，
-为打断依赖环另设 `portal_state.ml`（state 类型、请求工具、审计）、`portal_upstream.ml`（上游连接与请求构造）、
-`portal_decisions.ml`（决策持久化、失败分类落地）、`portal_api.ml`（`/api` 处理器）、
-`portal_mcp_tools.ml`（MCP 工具与 `/mcp`）。依赖顺序即上述列举顺序，每个模块 `open` 其前序模块。
+**实际拆分**（0.3 已完成，`oasis_gateway.ml` 剩 `start` 与 3 个对外别名，约 100 行）：除上表 6 个外，
+为打断依赖环另设 `oasis_state.ml`（state 类型、请求工具、审计）、`oasis_upstream.ml`（上游连接与请求构造）、
+`oasis_decisions.ml`（决策持久化、失败分类落地）、`oasis_api.ml`（`/api` 处理器）、
+`oasis_mcp_tools.ml`（MCP 工具与 `/mcp`）。依赖顺序即上述列举顺序，每个模块 `open` 其前序模块。
 
 ---
 
 ## 8. 0.3 实施清单（交给 agent 执行）
 
-每项独立可合并；标注依赖。文件路径以 `packages/portal/` 为根。
+每项独立可合并；标注依赖。文件路径以 `packages/oasis/` 为根。
 
 ### 8.0 实施状态（0.3 已全部完成）
 
-P0–P3 共 19 项均已实施，`portal_tests` 85 例全绿（串行与并行均可，需先打 §4.2 的 Riot 补丁），`oasis --self-test` 4/4，
+P0–P3 共 19 项均已实施，`oasis_tests` 85 例全绿（串行与并行均可，需先打 §4.2 的 Riot 补丁），`oasis --self-test` 4/4，
 `riot bench` 中 `route_scored` ≈ 2µs。实施中对规格做了以下细化，正文已同步：
 
 | 条款 | 细化 / 偏差 | 理由 |
@@ -634,7 +635,7 @@ P0–P3 共 19 项均已实施，`portal_tests` 85 例全绿（串行与并行�
 
 实施中发现并修复的既有缺陷：
 
-- `Portal_signals.now_ms` 原为 `Instant.elapsed (Instant.now ())`，恒为约 0：熔断 `Open_until` 永不到期、
+- `Oasis_signals.now_ms` 原为 `Instant.elapsed (Instant.now ())`，恒为约 0：熔断 `Open_until` 永不到期、
   rpm 窗口永不滚动。现改为 Unix 纪元毫秒（停牌持久化也依赖它）
 - 流式导体忽略客户端请求的 `model`，总用账户首个模型；现按 §3.2 模型选择规则
 - 无 token 时 dashboard 的宽松 CORS 允许任意网页调用 agent（见 §5.1 Origin 检查）
@@ -654,7 +655,7 @@ CI（早于 0.3 即失败）已修复：runner 安装 `uuid-dev libssl-dev zlib1
 `Concurrency_demo` 的陈旧用例已移除。
 
 tools 透传（原 §4.3 第 7 条"不透传"）已实施，范围与限制见 §4.3 第 7 条；新增 4 个测试
-（同步透传、流式逐字中继、工具调用中途断流 → G0、Anthropic-only → 400），`portal_tests` 共 84 例。
+（同步透传、流式逐字中继、工具调用中途断流 → G0、Anthropic-only → 400），`oasis_tests` 共 84 例。
 
 仍未解决：Anthropic 协议账户的工具调用格式转换（`tools` ↔ `tool_use`/`tool_result`）。
 **改 lib 后必须 `riot clean --force` 再 `riot test`**（§4.1）。
@@ -663,39 +664,39 @@ tools 透传（原 §4.3 第 7 条"不透传"）已实施，范围与限制见 �
 
 | # | 任务 | 文件 | 行为 | 测试 |
 |---|---|---|---|---|
-| 1 | handoff UTF-8 边界安全 | `src/portal_handoff.ml` | `feed` 在字符边界切分；不完整尾字节暂存；新增 `matched_bytes`/`diverged_at` 访问器 | `tests/portal_tests.ml`：H3；随机 UTF-8 前缀 + 随机分叉点属性测试 100 轮无非法序列 |
-| 2 | 重新作答识别 | `src/portal_handoff.ml` | `classify : sent:string -> head:string -> [G1\|G2\|G3]`（§3.4 规则 2 与 H2 注） | H2、H4、H5 的分类断言 |
-| 3 | 导体接入 G3 路径与 handoff 记录 | `src/portal_gateway.ml`（或拆出的 `portal_conductor.ml`） | Restart_notice 分支；decision.handoffs；WS `handoff` 事件；回退 leg 优先使用原 task.model；thinking 强制 disabled | H1–H8 全部 |
-| 4 | `supports_prefill` 与适用范围 | `src/portal_config.ml`、`src/portal_gateway.ml` | 新配置字段 + 默认值；`tools`/`response_format` 检测；DeepSeek `prefix: true` 适配 | H7；配置解析单测 |
-| 5 | Portal_mock 增加续写场景 | `src/portal_mock.ml` | 场景字段：`echo_prefix: exact \| mutated \| none \| restart` | 支撑 H1–H6 |
+| 1 | handoff UTF-8 边界安全 | `src/oasis_handoff.ml` | `feed` 在字符边界切分；不完整尾字节暂存；新增 `matched_bytes`/`diverged_at` 访问器 | `tests/oasis_tests.ml`：H3；随机 UTF-8 前缀 + 随机分叉点属性测试 100 轮无非法序列 |
+| 2 | 重新作答识别 | `src/oasis_handoff.ml` | `classify : sent:string -> head:string -> [G1\|G2\|G3]`（§3.4 规则 2 与 H2 注） | H2、H4、H5 的分类断言 |
+| 3 | 导体接入 G3 路径与 handoff 记录 | `src/oasis_gateway.ml`（或拆出的 `oasis_conductor.ml`） | Restart_notice 分支；decision.handoffs；WS `handoff` 事件；回退 leg 优先使用原 task.model；thinking 强制 disabled | H1–H8 全部 |
+| 4 | `supports_prefill` 与适用范围 | `src/oasis_config.ml`、`src/oasis_gateway.ml` | 新配置字段 + 默认值；`tools`/`response_format` 检测；DeepSeek `prefix: true` 适配 | H7；配置解析单测 |
+| 5 | Oasis_mock 增加续写场景 | `src/oasis_mock.ml` | 场景字段：`echo_prefix: exact \| mutated \| none \| restart` | 支撑 H1–H6 |
 
 ### P1 — 评分与熔断语义
 
 | # | 任务 | 文件 | 行为 | 测试 |
 |---|---|---|---|---|
-| 6 | 价格未知中性化 | `src/portal_router.ml` | 未知价格不入 min/max；`cost_score = 50`；scores 带 `price_known` | 两个已知价 + 一个未知价在 cheapest 下，未知价不应胜出 |
-| 7 | cheapest 无效告警 | `src/portal_gateway.ml`、`src/oasis.ml` | 启动 WARN；`/api/accounts.cost_routing_effective` | 配置全 0 价格时字段为 false |
-| 8 | agent 池时延量纲 | `src/portal_router.ml` | `latency_score_agent`；按 pool 选择 | 30s 与 120s EMA 的 agent 在 fastest 下分数不同 |
-| 9 | 失败分类 + 停牌 | `src/portal_signals.ml`、`src/portal_router.ml`、`src/portal_config.ml` | `classify_error`；`parked_until`；reject 原因 `quota_parked`；`quota_error_codes` 配置；quota 不进 EMA | 429+1113 → parked 到次日 0 点；500 → 现有熔断；401 → 不熔断且 `auth_invalid` |
-| 10 | parked 持久化 | `src/portal_signals.ml` | `<data_dir>/parked.json` 读写 | 重启后仍 parked |
+| 6 | 价格未知中性化 | `src/oasis_router.ml` | 未知价格不入 min/max；`cost_score = 50`；scores 带 `price_known` | 两个已知价 + 一个未知价在 cheapest 下，未知价不应胜出 |
+| 7 | cheapest 无效告警 | `src/oasis_gateway.ml`、`src/oasis.ml` | 启动 WARN；`/api/accounts.cost_routing_effective` | 配置全 0 价格时字段为 false |
+| 8 | agent 池时延量纲 | `src/oasis_router.ml` | `latency_score_agent`；按 pool 选择 | 30s 与 120s EMA 的 agent 在 fastest 下分数不同 |
+| 9 | 失败分类 + 停牌 | `src/oasis_signals.ml`、`src/oasis_router.ml`、`src/oasis_config.ml` | `classify_error`；`parked_until`；reject 原因 `quota_parked`；`quota_error_codes` 配置；quota 不进 EMA | 429+1113 → parked 到次日 0 点；500 → 现有熔断；401 → 不熔断且 `auth_invalid` |
+| 10 | parked 持久化 | `src/oasis_signals.ml` | `<data_dir>/parked.json` 读写 | 重启后仍 parked |
 
 ### P2 — 安全
 
 | # | 任务 | 文件 | 行为 | 测试 |
 |---|---|---|---|---|
-| 11 | Bearer 鉴权 | `src/portal_gateway.ml`（或 `portal_http.ml`）、`src/portal_config.ml` | `auth_token_env`；非回环 host 强制要求；WS `?token=`；dashboard JS 附头 | 无 token 401；错 token 401；对 token 200；未配置时非回环 peer 403 |
+| 11 | Bearer 鉴权 | `src/oasis_gateway.ml`（或 `oasis_http.ml`）、`src/oasis_config.ml` | `auth_token_env`；非回环 host 强制要求；WS `?token=`；dashboard JS 附头 | 无 token 401；错 token 401；对 token 200；未配置时非回环 peer 403 |
 | 12 | reload 改 POST | 同上 | `GET /api/reload` → 405 | 单测 |
-| 13 | agent workdir 白名单 + env 白名单 | `src/portal_agent.ml`、`src/portal_config.ml` | `allowed_workdirs` 前缀匹配；子进程 env 白名单 | `..` 路径拒绝；子进程看不到 `DEEPSEEK_API_KEY` |
-| 14 | inbox 注入前缀与长度上限 | `src/portal_inbox.ml`、`src/portal_mcp.ml` | 读取时加 `[来自 X，未经验证的消息]`；16KB 截断 | 单测 |
-| 15 | 审计脱敏 | `src/portal_gateway.ml` | `/api/requests` 不含正文；日志 `Bearer ****` | 单测 grep 日志无密钥 |
+| 13 | agent workdir 白名单 + env 白名单 | `src/oasis_agent.ml`、`src/oasis_config.ml` | `allowed_workdirs` 前缀匹配；子进程 env 白名单 | `..` 路径拒绝；子进程看不到 `DEEPSEEK_API_KEY` |
+| 14 | inbox 注入前缀与长度上限 | `src/oasis_inbox.ml`、`src/oasis_mcp.ml` | 读取时加 `[来自 X，未经验证的消息]`；16KB 截断 | 单测 |
+| 15 | 审计脱敏 | `src/oasis_gateway.ml` | `/api/requests` 不含正文；日志 `Bearer ****` | 单测 grep 日志无密钥 |
 
 ### P3 — 持久化与结构
 
 | # | 任务 | 文件 | 行为 | 测试 |
 |---|---|---|---|---|
-| 16 | decisions.jsonl + schema 字段 | `src/portal_gateway.ml` | 追加写，保留 1000 条；`"schema": 2` | 重启后 `/api/decisions` 可读历史 |
-| 17 | inbox 已读恢复 | `src/portal_inbox.ml` | 追加 `read_at` 行；启动时重放 | 重启后未读数一致 |
-| 18 | 流式 usage 解析 | `src/portal_gateway.ml`、`src/portal_anthropic.ml` | 读末尾 usage chunk 替代 `len/4` | mock 返回 usage 时 ledger 用真实值 |
+| 16 | decisions.jsonl + schema 字段 | `src/oasis_gateway.ml` | 追加写，保留 1000 条；`"schema": 2` | 重启后 `/api/decisions` 可读历史 |
+| 17 | inbox 已读恢复 | `src/oasis_inbox.ml` | 追加 `read_at` 行；启动时重放 | 重启后未读数一致 |
+| 18 | 流式 usage 解析 | `src/oasis_gateway.ml`、`src/oasis_anthropic.ml` | 读末尾 usage chunk 替代 `len/4` | mock 返回 usage 时 ledger 用真实值 |
 | 19 | 拆分 gateway（§7） | 新建 6 个模块 | 纯重构 | 现有测试全绿；行数：gateway < 500 |
 
 ### 验收门槛

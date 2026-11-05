@@ -1,0 +1,24 @@
+[package]
+name = "oasis"
+version = "0.1.0"
+
+[lib]
+path = "src/oasis.ml"
+
+[dependencies]
+std = "*"
+oasis_net = { path = "../net" }
+
+[[bin]]
+name = "oasis-probe"
+path = "examples/https_probe.ml"
+
+
+[[bin]]
+name = "oasis"
+path = "src/oasis_cli.ml"
+
+[[bin]]
+name = "oasis-mock"
+path = "examples/oasis_mock.ml"
+

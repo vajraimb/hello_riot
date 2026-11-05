@@ -1,28 +1,20 @@
 format_version = 1
 
-dependency_hash = "866a6b0511889ac0"
+dependency_hash = "968256c12e1acbbb"
 
 [[packages]]
-name = "hello_riot"
-root = "packages/hello_riot"
+name = "oasis_net"
+root = "packages/net"
 provenance = { kind = "workspace" }
 dependencies = [{ name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
 build_dependencies = []
 dev_dependencies = []
 
 [[packages]]
-name = "app"
-root = "packages/app"
+name = "oasis"
+root = "packages/oasis"
 provenance = { kind = "workspace" }
-dependencies = [{ name = "hello_riot", package = { name = "hello_riot" } }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
-build_dependencies = []
-dev_dependencies = []
-
-[[packages]]
-name = "portal"
-root = "packages/portal"
-provenance = { kind = "workspace" }
-dependencies = [{ name = "hello_riot", package = { name = "hello_riot" } }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
+dependencies = [{ name = "oasis_net", package = { name = "oasis_net" } }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
 build_dependencies = []
 dev_dependencies = []
 
