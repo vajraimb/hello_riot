@@ -168,7 +168,7 @@ let discover_home = fun (state : state) ->
   | None -> (
       match Env.var Env.String ~name:"REAL_HOME" with
       | Some h -> h
-      | None -> "/Users/vajra"
+      | None -> Oasis_config.user_home ()
     )
 
 let handle_list_agents = fun (state : state) (ctx : Trail.ctx) ->

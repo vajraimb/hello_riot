@@ -237,7 +237,7 @@ daily 语义）是**每 30s 烧一次请求并污染时延 EMA**。0.3 区分三
 | `POST /v1/chat/completions` | OpenAI 兼容（流式 SSE / 非流式）；头 `X-Oasis-Category` `X-Oasis-Goal` `X-Oasis-Mode` `X-Oasis-Session`；可选 `X-Oasis-Source`（来源标签，默认 `api`）、`X-Oasis-Client-Ref`（原样回显在 `task_started`，供控制台关联自己发起的请求）、`X-Oasis-Agent`（指定 agent）、`X-Oasis-Committee`（委员会成员，§2.4）、`X-Oasis-Thread`（续接对话，§2.6.2；响应头回传本轮所属的对话 id） |
 | `GET /v1/models` | KB 模型列表 |
 | `POST /mcp` | MCP（JSON-RPC 2.0 / Streamable HTTP 简化）11 工具：oasis_ask、oasis_agent_task、oasis_task_status、oasis_status、oasis_decisions、oasis_send_message、oasis_check_inbox、oasis_ask_user、oasis_activity、oasis_agents、oasis_models |
-| `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点 + 已配置 agent 的信号）、activity（时间线）、requests（审计）、**feed**（最近任务摘要）、**feed/task?id=**（单任务：路由说明 + 时间线 + 回答）、**threads?limit=**（最近对话摘要）、**thread?id=**（整段对话：各轮问答 + agent 会话 id；不存在 404）、**workspace?id=**（任务工作目录里的文件列表）、**workspace/file?id=&path=**（读一个产出文件，文本最多 512 KB）；`POST /api/thread/delete {"id"|"task", "files"}`（删除对话或无对话的任务，§2.6.5）、**alerts**（需要处理的问题 + 可复制的修复命令） |
+| `GET /api/*` | accounts（状态）、decisions（决策）、ledger（账本）、reload（热重载）、inbox（未读）、agents（盘点 + 已配置 agent 的信号）、activity（时间线）、requests（审计）、**feed**（最近任务摘要）、**feed/task?id=**（单任务：路由说明 + 时间线 + 回答）、**threads?limit=**（最近对话摘要）、**thread?id=**（整段对话：各轮问答 + agent 会话 id；不存在 404）、**workspace?id=**（任务工作目录里的文件列表）、**workspace/file?id=&path=**（读一个产出文件，文本最多 512 KB）；`POST /api/thread/delete {"id"|"task", "files"}`（删除对话或无对话的任务，§2.6.5）、**alerts**（需要处理的问题 + 可复制的修复命令）；配置向导（§2.8）：`GET /api/setup/scan`、`POST /api/setup/verify`、`POST /api/setup/apply` |
 | `WS /ws` | 实时推送：decision + 事件流（task_started → routed → attempt_started → attempt_finished → **[0.3 新增]** handoff → task_done，以及 agent 的 `agent_step`） |
 | `GET /` | 控制台（§2.6）：工作台（任务列表 / 任务详情 / 需要你处理 + 资源）与诊断页（账户明细、原始决策、过程图、agent 盘点、会话活动、收件箱） |
 
@@ -350,7 +350,35 @@ spec 只约束**语义**：
                   # [0.3] max_handoffs = 2 / handoff_notice = true / session_ttl_s = 600
 ```
 
-密钥只通过环境变量注入（`api_key_env`），**永不落盘到配置**。
+密钥只通过环境变量注入（`api_key_env`），**永不落盘到配置**。在配置页粘贴的 key 存进
+`$OASIS_HOME/secrets.env`（`KEY=value` 行，权限 0600，先写临时文件再原子改名），启动时加载进进程环境；
+同名时文件里的值优先于 shell 里的值。
+
+### 2.8 配置向导
+
+目标：用户只需点选就能用起来，不必手写 TOML。实现在 `Oasis_setup`（目录、探测、实测、文本合并）、
+`Oasis_setup_api`（三个接口）、`Oasis_setup_ui`（嵌入控制台的中英双语浮层）。
+
+- **内置目录**：13 家服务商，每家给出端点列表（如 Kimi：Kimi Coding → moonshot.cn → moonshot.ai；
+  GLM：z.ai Anthropic 端点 → z.ai paas → bigmodel）、协议、标准 key 变量名、已知模型及其 KB、
+  `prefer` 顺序和申请 key 的链接；6 个 agent 的无人值守参数（Claude Code 禁用 `AskUserQuestion`）。
+  目录外的模型按名字推断 KB（按名称分词判断 mini/flash/lite 等，避免 "gemini" 误判为 mini；
+  `gemini-3.1-pro-preview` 这类变体沿用最长前缀的目录项）
+- **探测**：key 变量取标准名，再加上任何同时含服务商关键字和 key/apikey/token/secret 片段的变量
+  （按 `_` 分词、不区分大小写）；agent 在 PATH 和常见安装目录（~/.local/bin、/opt/homebrew/bin 等）里找，
+  写入绝对路径；Ollama 读 `/api/tags`，云端模型逐个试问一次，嵌入模型剔除
+- **实测**：每个候选依次试各端点：`GET /models`，再用一个模型发 16 token 的 "ping"。
+  状态从好到差：`ok`、`rate_limited`、`no_balance`、`model_error`、`invalid_key`、`unreachable`、`no_key`，
+  保留最好的端点。实测都在 blocking lane 里并行跑，有总超时
+- **首次启动**：配置文件不存在时，并行实测全部候选（40 s 超时），`no_balance` 及更好的账户写入配置，
+  再加上 Ollama（`ollama_cloud` / `ollama_local`）和所有已安装的 agent；生成 general / research 路由；
+  写 `.setup-pending` 标记，控制台据此自动弹出配置页确认
+- **`needs_setup`**：有 `.setup-pending` 标记，或者既没有可用账户也没有已安装且启用的 agent
+- **合并（apply）**：在原文本上按块编辑，不重新序列化。只改用户勾选变化的 `enabled` 行；新的模型、
+  账户、agent 追加在 "added by the Oasis setup wizard" 注释之后；新账户按类别追加进已有的 `[[routes]]`；
+  没有任何路由时才生成路由；可选改 `policy.goal`。多行数组按方括号配平识别。
+  没选任何改动时输出与输入逐字节相同。写入前先用 `Oasis_config.load` 校验合并结果，旧文件留作
+  `oasis.toml.bak`，然后热替换运行中的配置并删除 pending 标记
 
 ---
 
@@ -718,6 +746,8 @@ tools 透传（原 §4.3 第 7 条"不透传"）已实施，范围与限制见 �
 - [x] **0.3 P1**：评分偏置修正 + 失败分类/停牌
 - [x] **0.3 P2**：鉴权 + agent 沙箱边界 + inbox 注入防护
 - [x] **0.3 P3**：持久化补全 + gateway 拆分
+- [x] 配置向导（§2.8）：首次启动自动探测 + 实测，控制台点选确认，key 可粘贴（secrets.env）
+- [ ] 控制台其余部分的中英双语
 - [ ] 真实价格填充（成本调度闭环；依赖 P1-6/7 使其行为正确）
 - [ ] 监督树（待 Riot 运行时修复）
 - [ ] 云端 agent 账户（异步任务模型已就绪）

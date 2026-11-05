@@ -189,8 +189,8 @@ let collect = fun (state : state) ~(home : string) ->
   let config = Sync.Atomic.get state.config in
   let discovered = Oasis_discover.scan ~home in
   let all =
-    List.flat_map config.Oasis_config.accounts ~fn:(account_alerts state)
-    @ List.flat_map config.Oasis_config.agents ~fn:(agent_alerts state ~discovered)
+    List.concat (List.map config.Oasis_config.accounts ~fn:(account_alerts state))
+    @ List.concat (List.map config.Oasis_config.agents ~fn:(agent_alerts state ~discovered))
   in
   List.filter all ~fn:(fun a -> String.equal a.severity "error")
   @ List.filter all ~fn:(fun a -> not (String.equal a.severity "error"))

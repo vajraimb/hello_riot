@@ -20,6 +20,7 @@ Oasis 挡在它们前面，每个请求都替你做这个选择。
 
 ## 你能得到什么
 
+- **点几下就配好，不用改文件**：首次启动时，Oasis 会找出你环境里已有的 API key，逐个到服务商那里实测，列出本机 Ollama 的模型，并检测哪些 agent CLI 已安装、已登录。随后弹出的配置页会标明哪些能用、哪些额度用完、哪些 key 无效。勾选想用的，保存即可。缺了哪家服务商，就把它的 key 粘贴到同一页里。
 - **直接替换的 OpenAI 兼容接口**：任何客户端、SDK、聊天应用，把地址指向 `http://127.0.0.1:9899/v1`，`model` 填 `auto`，照常使用。流式和非流式都支持。
 - **会解释自己的路由**：Oasis 先判断任务类别（编程、联网检索、写作、分析、通用），再按模型强项、价格、剩余预算、实时时延、健康度，以及从你过去的结果里学到的质量，给每个候选账户打分。目标由你定：均衡、最快、质量优先、最省钱。每一次决策和每个被排除的候选，控制台里都看得到。
 - **流式中途无缝切换**：账户在流式输出时额度耗尽或断线，Oasis 从文字断开的地方接到下一个账户继续写，不重复一个字，客户端收到的是一条连续的回答。这是 Oasis 的招牌能力，自检一秒内就能演示出来。
@@ -27,7 +28,7 @@ Oasis 挡在它们前面，每个请求都替你做这个选择。
 - **委员会模式**：一个问题同时问最多三个账户，汇总成一份回答，标明共识和分歧。
 - **真正好用的控制台** `http://127.0.0.1:9899/`：任务列表、路由说明、实时过程、产出文件，可以追问、停止、删除。
 - **MCP 服务** `POST /mcp`：别的 agent 可以通过 Oasis 调模型、把任务交给你的本机 agent、互相发消息。
-- **小而私密**：一个不到 10 MB 的二进制文件，路由决策约 2 微秒。所有状态都在本机的 `~/.oasis`，API key 只放环境变量，从不写进配置文件。
+- **小而私密**：一个不到 10 MB 的二进制文件，路由决策约 2 微秒。所有状态都在本机的 `~/.oasis`。API key 从不写进配置文件：要么留在你的环境变量里，要么（在配置页粘贴时）存进只有你本人可读的 `~/.oasis/secrets.env`；启动 agent 时也不会把它们带过去。
 
 ![委员会模式：三个账户分别作答，再由一个模型写出共识与分歧](docs/images/committee.png)
 
@@ -58,15 +59,22 @@ scripts/oasis.sh --self-test                        # 不需要任何 API key
 
 自检会启动模拟上游，跑四项端到端检查：路由、遇到 `429` 自动回退、流式输出，以及流式回答中途被切断、由另一个账户续写完成且零重复。
 
-然后加上你自己的账户：
+然后正式启动：
 
 ```bash
-mkdir -p ~/.oasis && cp config/oasis.example.toml ~/.oasis/oasis.toml   # 也可以让首次启动自动生成一份最简配置
-$EDITOR ~/.oasis/oasis.toml                        # 只保留你手上有的账户和 agent
-export DEEPSEEK_API_KEY=sk-...                     # key 放在 shell 里，比如 ~/.zshrc
-scripts/oasis.sh start
-open http://127.0.0.1:9899/
+scripts/oasis.sh start                              # 首次启动会自动探测你的账户和 agent
+open http://127.0.0.1:9899/                         # 配置页会自动弹出
 ```
+
+首次启动时，Oasis 根据探测结果生成 `~/.oasis/oasis.toml`：
+
+- 环境变量里的 API key，覆盖 13 家服务商：DeepSeek、Kimi、GLM、OpenRouter、Perplexity、通义千问（DashScope）、OpenAI、Anthropic、Gemini、xAI、Groq、Mistral、硅基流动。`DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY` 这类标准名能识别，`glm_work_key` 这种自己起的名字也能识别。每个 key 都会实测；对有多个端点的服务商（Kimi Coding 与 Moonshot、国内站与国际站），Oasis 会留下能用的那个；
+- 正在运行的 Ollama 里的本地模型和云端模型；
+- 已安装的 Claude Code、Cursor Agent、Gemini CLI、Kimi CLI、Grok CLI、opencode。
+
+接着，控制台里的配置页会列出每个账户的状态：可用、限流中、额度用完、key 无效或连不上。取消勾选不想用的，给还没配置的服务商粘贴 key，选一个路由目标，点 **保存并开始**。之后随时可以从 **设置** 按钮重新打开。它在你现有的配置上原地修改：手写的条目、注释和调过的数值都保持原样，修改前的版本存为 `oasis.toml.bak`。配置页跟随浏览器语言，显示中文或英文。
+
+更喜欢直接写文件？在首次启动前把 [`config/oasis.example.toml`](config/oasis.example.toml) 复制到 `~/.oasis/oasis.toml`，Oasis 就不会再自动生成。
 
 `scripts/oasis.sh` 还支持 `stop`、`restart`、`status`、`logs`；其他参数原样交给 `oasis` 程序，所以 `scripts/oasis.sh ask "你好" --stream`、`scripts/oasis.sh models` 也能用。
 
@@ -130,13 +138,14 @@ curl -N http://127.0.0.1:9899/v1/chat/completions \
 - **accounts**：端点、存 key 的环境变量名、提供哪些模型、限速和预算；
 - **agents**：CLI 命令，以及让它无人值守运行的参数。
 
-routes 再规定每个类别允许哪些账户执行。改完配置调用 `POST /api/reload`，或者重启。
+routes 再规定每个类别允许哪些账户执行。这些配置页都会替你写好；如果手动改了文件，调用 `POST /api/reload` 或者重启。
 
 运行时文件：
 
 ```
 ~/.oasis/                  （OASIS_HOME 可改）
 ├── oasis.toml             配置
+├── secrets.env            在配置页粘贴的 key（权限 0600，启动时加载）
 ├── data/                  对话、路由决策、成本账本、学到的质量与时延
 ├── workspaces/<对话 id>/  每个对话一个工作目录，agent 的产出都在这里
 └── logs/oasis.log

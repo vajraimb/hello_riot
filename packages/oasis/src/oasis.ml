@@ -44,3 +44,4 @@ module AgentWorker = Oasis_agent_worker
 module Conductor = Oasis_conductor
 module Http = Oasis_http
 module Gateway = Oasis_gateway
+module Setup = Oasis_setup

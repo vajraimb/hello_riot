@@ -33,21 +33,38 @@ let status_json = fun (s : agent_status) ->
       ("projects", Json.array (List.map s.projects ~fn:(fun p -> Json.string p)));
     ]
 
-let find_command = fun ~home cmd ->
+(** Absolute path of [cmd]: PATH first, then the usual per-user install
+    locations, since the gateway may run without the login shell's PATH. *)
+let locate_command = fun ~home cmd ->
+  let path_dirs =
+    Env.var Env.String ~name:"PATH" |> Option.unwrap_or ~default:""
+    |> String.split ~by:":"
+    |> List.filter ~fn:(fun d -> not (String.is_empty d))
+  in
   let dirs =
-    [
+    path_dirs
+    @ [
       home ^ "/.local/bin";
       home ^ "/bin";
+      home ^ "/.npm-global/bin";
+      home ^ "/.bun/bin";
+      home ^ "/.cargo/bin";
+      home ^ "/.volta/bin";
+      home ^ "/.opencode/bin";
+      home ^ "/.grok/bin";
       "/opt/homebrew/bin";
       "/usr/local/bin";
       "/usr/bin";
       "/opt/bin";
     ]
   in
-  List.any dirs ~fn:(fun d ->
-    match Fs.exists (Path.from_string (d ^ "/" ^ cmd) |> Result.unwrap) with
-    | Ok true -> true
-    | _ -> false)
+  List.find dirs ~fn:(fun d ->
+    match Path.from_string (d ^ "/" ^ cmd) with
+    | Error _ -> false
+    | Ok path -> (match Fs.exists path with Ok true -> true | _ -> false))
+  |> Option.map ~fn:(fun d -> d ^ "/" ^ cmd)
+
+let find_command = fun ~home cmd -> Option.is_some (locate_command ~home cmd)
 
 let read_json_file = fun path ->
   match Fs.read_to_string (Path.from_string path |> Result.unwrap) with

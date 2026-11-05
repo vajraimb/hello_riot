@@ -78,13 +78,13 @@ let connect_upstream = fun ?(connect_ip = "") ~scheme ~host ~port () ->
       | Ok conn -> Ok conn
     )
 
-let upstream_call = fun ?connect_ip ~scheme ~host ~port ~path ~headers ~body () ->
+let upstream_call = fun ?connect_ip ?(method_ = "POST") ~scheme ~host ~port ~path ~headers ~body () ->
   match connect_upstream ?connect_ip ~scheme ~host ~port () with
   | Error e -> Error e
   | Ok conn ->
       let req =
         Oasis_client.make_request
-          ~method_:"POST"
+          ~method_
           ~path
           ~headers
           ~body
@@ -103,11 +103,11 @@ let upstream_call = fun ?connect_ip ~scheme ~host ~port ~path ~headers ~body () 
 (** Run an outbound request on a dedicated blocking lane. Waits until the
     upstream answers unless [timeout_s] is given; a [Task_cancel] sent to the
     calling actor ends the wait with [cancel_error]. *)
-let blocking_call = fun ?connect_ip ?timeout_s ~scheme ~host ~port ~path ~headers ~body () ->
+let blocking_call = fun ?connect_ip ?method_ ?timeout_s ~scheme ~host ~port ~path ~headers ~body () ->
   let reply_to = self () in
   let _ =
     Runtime.spawn_blocked (fun () ->
-      let res = upstream_call ?connect_ip ~scheme ~host ~port ~path ~headers ~body () in
+      let res = upstream_call ?connect_ip ?method_ ~scheme ~host ~port ~path ~headers ~body () in
       send reply_to (Upstream_result res);
       Ok ())
   in

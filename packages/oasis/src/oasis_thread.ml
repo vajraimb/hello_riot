@@ -131,7 +131,7 @@ let history = fun ?(max_chars = 60000) (th : thread) ->
     partial answer, marked, so the model knows where it stopped. *)
 let history_messages = fun ?max_chars (th : thread) ->
   history ?max_chars th
-  |> List.flat_map ~fn:(fun (x : turn) ->
+  |> List.map ~fn:(fun (x : turn) ->
     let msg role content = Json.obj [ ("role", Json.string role); ("content", Json.string content) ] in
     let answer =
       if String.equal x.status "ok" then x.answer
@@ -139,6 +139,7 @@ let history_messages = fun ?max_chars (th : thread) ->
       else x.answer ^ "\n\n（上一轮未完成，到此中断）"
     in
     [ msg "user" x.prompt; msg "assistant" answer ])
+  |> List.concat
 
 (* ---------- json ---------- *)
 

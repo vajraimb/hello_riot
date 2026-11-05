@@ -54,8 +54,9 @@ goal = "balanced"
 max_fallback = 2
 |}
 
-(** First run: the config does not exist yet, so the example is written
-    there to edit (keys stay in environment variables, never in the file). *)
+(** First run: the config does not exist yet, so it is built from what this
+    machine already has (keys that answer, Ollama, agent CLIs); the
+    dashboard then opens the setup wizard to confirm or extend it. *)
 let ensure_default_config = fun path ->
   match Path.from_string path with
   | Error _ -> ()
@@ -64,8 +65,14 @@ let ensure_default_config = fun path ->
       | Ok true -> ()
       | _ ->
           let _ = Fs.create_dir_all (Path.from_string (Oasis.Config.home ()) |> Result.unwrap) in
-          (match Fs.write example_config p with
-           | Ok () -> println ("已生成默认配置 " ^ path ^ "，按需编辑后重启（API key 只放环境变量）")
+          println "首次启动：正在探测本机的 AI 账户和 agent… / First start: detecting AI accounts and agents…";
+          let choices = Oasis.Setup.first_run_choices ~home:(Oasis.Config.user_home ()) in
+          (match Fs.write (Oasis.Setup.merge ~text:"" choices) p with
+           | Ok () ->
+               Oasis.Setup.mark_pending ();
+               println
+                 ("已生成配置 " ^ path ^ "：" ^ Int.to_string (List.length choices.Oasis.Setup.add_accounts) ^ " 个账户、"
+                 ^ Int.to_string (List.length choices.Oasis.Setup.add_agents) ^ " 个 agent。打开控制台确认或补充。")
            | Error _ -> ()))
 
 let banner = fun (config : Oasis.Config.t) ~config_path (pool : Oasis_net.Atacama.pool) ->
@@ -731,6 +738,7 @@ let main ~args =
         eprintln e;
         Error (Failure e)
   ) else
+    let _ = Oasis.Setup.load_secrets () in
     let config_path =
       if String.is_empty !config_path then (
         let p = Oasis.Config.default_config_path () in

@@ -21,6 +21,7 @@ module Discover = Oasis.Discover
 module Classify = Oasis.Classify
 module Activity = Oasis.Activity
 module Gateway = Oasis.Gateway
+module Setup = Oasis.Setup
 
 let dir_seq = ref 0
 
@@ -3674,6 +3675,79 @@ let test_gateway_loopback_guards = fun _ctx ->
 
 (* ---------- spec 0.3 §5.3: audit redaction ---------- *)
 
+(* ---------- setup wizard ---------- *)
+
+let no_choices : Setup.choices = { enable_accounts = []; enable_agents = []; add_accounts = []; add_agents = []; goal = None }
+
+let user_config =
+  "# my notes\n\n[server]\nport = 9899 # keep\n\n[[accounts]]\nname = \"mine\"\nprovider = \"deepseek\"\nbase_url = \"https://api.deepseek.com\"\napi_key_env = \"MY_KEY\"\nmodels = [\n  \"deepseek-v4-pro\",\n]\n\n[[routes]]\ncategory = \"general\"\naccounts = [\n  \"mine\", # main\n]\n"
+
+let test_thread_history_oldest_first = fun _ctx ->
+  let turn prompt =
+    { Oasis.Thread.request_id = prompt; prompt; answer = "a-" ^ prompt; executor = "x"; mode = "chat"; status = "ok"; finished_ms = 0 }
+  in
+  let th : Oasis.Thread.thread =
+    { id = "t"; title = ""; created_ms = 0; updated_ms = 0; turns = [ turn "one"; turn "two" ]; sessions = []; members = []; workspace = "" }
+  in
+  let contents =
+    Oasis.Thread.history_messages th
+    |> List.filter_map ~fn:(fun m -> Json.get_field "content" m |> Option.and_then ~fn:Json.get_string)
+  in
+  Test.assert_equal ~expected:[ "one"; "a-one"; "two"; "a-two" ] ~actual:contents;
+  Ok ()
+
+let test_setup_merge_noop_keeps_text = fun _ctx ->
+  Test.assert_equal ~expected:user_config ~actual:(Setup.merge ~text:user_config no_choices);
+  Ok ()
+
+let test_setup_merge_changes = fun _ctx ->
+  let c =
+    {
+      no_choices with
+      enable_accounts = [ ("mine", false) ];
+      add_accounts =
+        [ { na_name = ""; na_provider = "glm"; na_base_url = "https://api.z.ai/api/anthropic"; na_protocol = "anthropic"; na_env = "GLM_API_KEY"; na_models = [ "glm-5.3" ] } ];
+      goal = Some "fastest";
+    }
+  in
+  let out = Setup.merge ~text:user_config c in
+  let starts = String.starts_with ~prefix:"# my notes\n\n[server]\nport = 9899 # keep\n" out in
+  Test.assert_equal ~expected:true ~actual:starts;
+  Test.assert_equal ~expected:true ~actual:(String.contains out "api_key_env = \"MY_KEY\"\nmodels = [\n  \"deepseek-v4-pro\",\n]\nenabled = false\n");
+  Test.assert_equal ~expected:true ~actual:(String.contains out "accounts = [\"mine\", \"glm\"]");
+  Test.assert_equal ~expected:true ~actual:(String.contains out "goal = \"fastest\"");
+  Test.assert_equal ~expected:out ~actual:(Setup.merge ~text:out no_choices);
+  let file = "./.oasis-test-config-setup-merge.toml" in
+  match Fs.write out (Path.from_string file |> Result.unwrap) with
+  | Error e -> Error ("write failed: " ^ IO.error_message e)
+  | Ok () -> (
+      match Config.load file with
+      | Error e -> Error ("merged config does not load: " ^ e)
+      | Ok cfg ->
+          Test.assert_equal ~expected:[ "mine"; "glm" ] ~actual:(List.map cfg.accounts ~fn:(fun (a : Config.account) -> a.name));
+          Ok ())
+
+let test_setup_fresh_skeleton_order = fun _ctx ->
+  let out = Setup.merge ~text:"" { no_choices with add_agents = [ ("claude_code", "/usr/bin/claude") ] } in
+  let headers = String.split ~by:"\n" out |> List.filter ~fn:(String.starts_with ~prefix:"[") in
+  Test.assert_equal ~expected:[ "[server]"; "[policy]"; "[[agents]]" ] ~actual:headers;
+  Ok ()
+
+let test_setup_spec_for = fun _ctx ->
+  let s = Setup.spec_for ~pid:"gemini" "gemini-3.1-pro-preview" in
+  Test.assert_equal ~expected:("gemini-3.1-pro-preview", 5, "medium") ~actual:(s.id, s.tier, s.latency);
+  let s = Setup.spec_for ~pid:"openai" "gpt-9-mini" in
+  Test.assert_equal ~expected:(3, "fast") ~actual:(s.tier, s.latency);
+  let s = Setup.spec_for ~pid:"openai" "geminist-pro" in
+  Test.assert_equal ~expected:"medium" ~actual:s.latency;
+  Ok ()
+
+let test_setup_parse_secrets = fun _ctx ->
+  Test.assert_equal
+    ~expected:[ ("A_KEY", "x1"); ("B", "two words"); ("C", "q'd") ]
+    ~actual:(Setup.parse_secrets "# c\nexport A_KEY=x1\nB=\"two words\"\n\nC='q'd'\n1BAD=no\nnot a line\n");
+  Ok ()
+
 let test_redact_secrets = fun _ctx ->
   Test.assert_equal
     ~expected:"auth failed for Bearer ****, retry"
@@ -4178,6 +4252,12 @@ let tests =
     case ~size:Test.Large "gateway: loopback-only without a token; GET /api/reload is 405" test_gateway_loopback_guards;
     case ~size:Test.Large "gateway: decisions.jsonl survives a restart" test_gateway_decisions_survive_restart;
     case ~size:Test.Large "gateway: streaming usage chunk feeds the ledger" test_gateway_stream_usage_recorded;
+    case "thread: history messages are oldest first" test_thread_history_oldest_first;
+    case "setup: merge with no choices keeps the file byte for byte" test_setup_merge_noop_keeps_text;
+    case "setup: merge toggles, adds, extends routes, keeps user lines" test_setup_merge_changes;
+    case "setup: fresh config keeps skeleton order" test_setup_fresh_skeleton_order;
+    case "setup: secrets.env parsing" test_setup_parse_secrets;
+    case "setup: model specs from the catalog and name heuristics" test_setup_spec_for;
     case "audit: secret redaction and hash8" test_redact_secrets;
     case ~size:Test.Large "gateway: audit log and errors carry no content or keys" test_gateway_audit_has_no_content_or_keys;
     case "agent: workdir resolution against allowed_workdirs" test_agent_resolve_workdir;

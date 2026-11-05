@@ -1,3 +1,5 @@
+open Std
+
 (** Embedded dashboard page (HTML/JS, no logic). *)
 
 let index_html =
@@ -261,6 +263,7 @@ body.resizing{cursor:col-resize;user-select:none}
     <span id="h-today">API 今日 <b>–</b> 次</span>
     <span id="h-alerts"></span>
     <span id="h-ws"><span class="dot"></span>连接中</span>
+    <button class="railbtn" id="setup-open" title="账户与 agent 配置 / Accounts and agents">设置</button>
     <button class="railbtn" id="list-toggle" title="显示 / 隐藏任务栏（快捷键 [）">任务栏</button>
     <button class="railbtn" id="rail-toggle" title="显示 / 隐藏右栏（快捷键 \）">侧栏</button>
   </div>
@@ -1265,5 +1268,6 @@ setInterval(loadResources, 5000);
 setInterval(loadAlerts, 15000);
 setInterval(() => { if ($('view-diag').classList.contains('on')) renderAccTable(); }, 5000);
 </script>
+|} ^ Oasis_setup_ui.html ^ {|
 </body>
 </html>|}
