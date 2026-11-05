@@ -4,138 +4,69 @@
 
 **One local endpoint for every AI account and coding agent you already pay for.**
 
-Oasis picks the right model or agent for each request.<br>
+Oasis picks the right model or agent for each request.
 When an account runs out of quota halfway through an answer, it hands the stream to the next one. Your client never notices.
 
 **English** · [简体中文](README.zh-CN.md)
 
-<br>
-
-[![MIT](https://img.shields.io/badge/license-MIT-111111)](LICENSE)
-![macOS | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-111111)
-![OpenAI compatible](https://img.shields.io/badge/API-OpenAI%20compatible-111111)
-![one binary](https://img.shields.io/badge/binary-%3C%2010%20MB-111111)
-
-<br>
-
-[Highlights](#five-things-it-takes-on) · [Ways in](#ways-to-use-it) · [Quick start](#quick-start) · [Configuration](#configuration)
+🗂️ [Highlights](#five-things-it-takes-on) · 🚪 [Ways in](#ways-to-use-it) · 🚀 [Quick start](#quick-start) · ⚙️ [Configuration](#configuration)
 
 </div>
 
-<br>
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-<img src="docs/images/agent-task.png" alt="Oasis running a coding task with Claude Code: the routing explanation, live tool calls, and the result">
-
-<sub>One task shows the route, the agent's tool calls, and the result.</sub>
-
-</td>
-<td width="50%" valign="top">
-
-<img src="docs/images/committee.png" alt="Committee mode: three accounts answer and one model writes the consensus">
-
-<sub>Three accounts answer, then one reply marks where they agree and where they do not.</sub>
-
-</td>
-</tr>
-</table>
+![One task shows the route, the agent's tool calls, and the result](docs/images/agent-task.png)
 
 ## Five things it takes on
 
-<table>
-<tr>
-<td width="50%" valign="top">
+### 🗂️ One desk for every account
 
-### One desk for every account
+> Accounts live in separate consoles, separate CLIs, and a pile of environment variables.
 
-<sub>Accounts live in separate consoles, separate CLIs, and a pile of environment variables.</sub>
+One local process gathers the API accounts and the local agents into one config and one setup page. The first start finds the keys, the running Ollama, and the installed agents, tests each one, and marks it ✅ working, ⏳ out of quota, or 🚫 rejected or unreachable. You tick what stays. 🔑 Keys stay in the environment, or in an owner-only `secrets.env`. They are not written into the config, and they are not passed to agents.
 
-<br>
+### 👀 One view of every task
 
-One local process gathers the API accounts and the local agents into one config and one setup page. The first start finds the keys, the running Ollama, and the installed agents, tests each one, and marks it working, out of quota, rejected, or unreachable. You tick what stays. Keys stay in the environment, or in an owner-only `secrets.env`. They are not written into the config, and they are not passed to agents.
-
-</td>
-<td width="50%" valign="top">
-
-### One view of every task
-
-<sub>The work is scattered across chat windows, and afterwards you cannot see why that path was taken.</sub>
-
-<br>
+> The work is scattered across chat windows, and afterwards you cannot see why that path was taken.
 
 The dashboard gathers a task into one place: the routing explanation, the live steps, the files it produced, the follow-up, and the stop button. If the account changes halfway through a stream, you still read one answer, and the switch is recorded on that task. The self-test cuts a stream on purpose and checks that no words were repeated.
 
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
+### 🎯 A free hand with agents
 
-### A free hand with agents
+> Each agent is its own app. A task is locked inside one, or you change windows yourself.
 
-<sub>Each agent is its own app. A task is locked inside one, or you change windows yourself.</sub>
+Let Oasis choose, or name an agent, or name a model. Ask a question, or send the work to a local agent that edits files and runs commands. Up to three accounts can answer the same question, and one merged reply shows where they agree and where they do not. The goal can be ⚖️ balanced, ⚡ fastest, 🏆 best, or 💸 cheapest. A follow-up resumes that agent's own session, in that conversation's directory.
 
-<br>
+![Three accounts answer, then one reply marks where they agree and where they do not](docs/images/committee.png)
 
-Let Oasis choose, or name an agent, or name a model. Ask a question, or send the work to a local agent that edits files and runs commands. Up to three accounts can answer the same question, and one merged reply shows where they agree and where they do not. The goal can be balanced, fastest, best, or cheapest. A follow-up resumes that agent's own session, in that conversation's directory.
+### 💰 Spend you can read
 
-</td>
-<td width="50%" valign="top">
-
-### Spend you can read
-
-<sub>What this month cost, and what each provider has left, means opening each billing page.</sub>
-
-<br>
+> What this month cost, and what each provider has left, means opening each billing page.
 
 Every account shows this month's spend next to its monthly budget. Every routing decision writes the cost term beside fit, speed, and load. With the goal set to cheapest, cost is seventy percent of the score. A daily cap, a per-minute limit, or a monthly budget is a hard stop: an account past it is not chosen. A model with no price yet keeps a neutral cost term, so it is not preferred for being free.
 
-</td>
-</tr>
-<tr>
-<td colspan="2" valign="top">
+### 🧩 Add the next one yourself
 
-### Add the next one yourself
-
-<sub>A new provider or a new agent usually means another tool.</sub>
-
-<br>
+> A new provider or a new agent usually means another tool.
 
 An account is an OpenAI-compatible endpoint or an Anthropic endpoint. An agent is a local command. The built-in 13 providers and 6 agents are ready-made entries. Paste a key on the setup page, or add a block to the config, and you have one more. Other programs can also connect over MCP to ask a model or hand off a task.
-
-</td>
-</tr>
-</table>
 
 ## Ways to use it
 
 The five above are what Oasis takes on. Below is where you walk into the same gateway. Examples follow.
 
-| Door | What you do |
-|---|---|
-| Dashboard | Open `http://127.0.0.1:9899/`, type a task, watch the route and the live steps, then follow up, stop, or delete. |
-| OpenAI API | Point any SDK or chat app at `http://127.0.0.1:9899/v1` and set `model` to `auto`. Streaming and one-shot both work. |
-| Terminal | `scripts/oasis.sh ask "..." --stream`, or `scripts/oasis.sh models`. |
-| Local agent | Send `X-Oasis-Mode: agent`. Oasis picks an installed agent, or you name one with `X-Oasis-Agent`. |
-| Committee | Send `X-Oasis-Committee` with up to three accounts. One merged answer shows where they agree and where they do not. |
-| MCP | Other agents call `POST /mcp` to ask a model, hand work to your local agents, or leave a message for each other. |
+- 🖥️ **Dashboard** — open `http://127.0.0.1:9899/`, type a task, watch the route and the live steps, then follow up, stop, or delete.
+- 🔌 **OpenAI API** — point any SDK or chat app at `http://127.0.0.1:9899/v1` and set `model` to `auto`. Streaming and one-shot both work.
+- ⌨️ **Terminal** — `scripts/oasis.sh ask "..." --stream`, or `scripts/oasis.sh models`.
+- 🛠️ **Local agent** — send `X-Oasis-Mode: agent`. Oasis picks an installed agent, or you name one with `X-Oasis-Agent`.
+- 👥 **Committee** — send `X-Oasis-Committee` with up to three accounts. One merged answer shows where they agree and where they do not.
+- 🤝 **MCP** — other agents call `POST /mcp` to ask a model, hand work to your local agents, or leave a message for each other.
 
 ## Why Riot and OCaml
 
-<table>
-<tr>
-<td align="center" width="33%"><h3>&lt; 10 MB</h3>one binary: API, dashboard, event stream, and MCP</td>
-<td align="center" width="33%"><h3>~2 µs</h3>to score a route, so every request is scored again</td>
-<td align="center" width="33%"><h3>1 process</h3>no database to run, and no runtime to keep alive beside it</td>
-</tr>
-</table>
+All of the state stays in `~/.oasis` on your machine. There is no database to run, and no runtime to keep alive beside it.
 
-All of the state stays in `~/.oasis` on your machine. Two properties of that stack are why the hard parts are small:
-
-- Scoring a route takes about 2 µs, so every request is scored again. Oasis does not reuse a cached choice.
-- Each stream is its own actor. When an account fails mid-answer, late bytes from the old connection are dropped and the next account continues. Latency, circuit breakers, and in-flight counts live in shared concurrent maps, so the next request sees the failure.
+- 📦 **Under 10 MB.** One binary serves the API, the dashboard, the event stream, and MCP.
+- ⚡ **About 2 µs** to score a route, so every request is scored again. Oasis does not reuse a cached choice.
+- 🧵 **Each stream is its own actor.** When an account fails mid-answer, late bytes from the old connection are dropped and the next account continues. Latency, circuit breakers, and in-flight counts live in shared concurrent maps, so the next request sees the failure.
 
 A supervision tree that restarts a crashed agent is still ahead. Today the boundary is one actor per request. [docs/oasis-spec.md](docs/oasis-spec.md) §1.4 records what is already true and what is not.
 
