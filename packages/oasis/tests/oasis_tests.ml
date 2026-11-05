@@ -3696,6 +3696,77 @@ let test_thread_history_oldest_first = fun _ctx ->
   Test.assert_equal ~expected:[ "one"; "a-one"; "two"; "a-two" ] ~actual:contents;
   Ok ()
 
+let show_seen = fun (s : Oasis.Observe.seen) -> s.plan ^ "|" ^ s.usage ^ "|" ^ s.tokens ^ "|" ^ s.reset
+
+let test_observe_plan_page = fun _ctx ->
+  let s =
+    Oasis.Observe.extract
+      [
+        "CURRENT PLAN";
+        "Super";
+        "Get Ultra";
+        "Weekly usage resets on Nov 12 (7 days left)";
+        "Weekly usage limit";
+        "30%";
+        "Included usage with your subscription. Resets Nov 12. Used before your credits.";
+      ]
+  in
+  let actual = show_seen s in
+  let expected = "Super|30%||Weekly usage resets on Nov 12 (7 days left)" in
+  if not (String.equal expected actual) then panic actual;
+  Ok ()
+
+let test_observe_ignores_chat = fun _ctx ->
+  let s =
+    Oasis.Observe.extract
+      [
+        "Context 16%";
+        "Vercel Labs发布了agent-desktop说是通过系统就能看到应用的内容，你可以试试，用来看各种agent的账户性质，token消耗数量和比例，以及reset的时间。如果行的话，把它接进来";
+        "Get Ultra";
+      ]
+  in
+  let actual = show_seen s in
+  if not (String.equal "|||" actual) then panic actual;
+  Ok ()
+
+let test_observe_tokens_near_usage = fun _ctx ->
+  let s = Oasis.Observe.extract [ "Weekly usage limit"; "12,345 / 100,000"; "30% used" ] in
+  let actual = show_seen s in
+  let expected = "|30%|12345/100000|" in
+  if not (String.equal expected actual) then panic actual;
+  Ok ()
+
+let test_observe_snapshot_tree = fun _ctx ->
+  let body =
+    "{\"ok\":true,\"data\":{\"tree\":{\"role\":\"window\",\"name\":\"Cursor Agents\",\"children\":[{\"role\":\"text\",\"name\":\"CURRENT PLAN\"},{\"role\":\"text\",\"name\":\"Super\"},{\"role\":\"text\",\"name\":\"Weekly usage limit\"},{\"role\":\"text\",\"name\":\"30%\"}]}}}"
+  in
+  let s = Oasis.Observe.extract (Oasis.Observe.names_of body) in
+  let actual = show_seen s in
+  if not (String.equal "Super|30%||" actual) then panic actual;
+  Ok ()
+
+let test_observe_token_total = fun _ctx ->
+  let zcode = Oasis.Observe.extract [ "262.6M"; "Total tokens"; "95.3M"; "Peak tokens"; "246.5M"; "tokens" ] in
+  if not (String.equal "||262.6M|" (show_seen zcode)) then panic (show_seen zcode);
+  let deepseek = Oasis.Observe.extract [ "API requests"; "91"; "Tokens"; "9,888,476"; "6M" ] in
+  if not (String.equal "||9888476|" (show_seen deepseek)) then panic (show_seen deepseek);
+  let model_share = Oasis.Observe.extract [ "Model usage"; "246.5M"; "tokens"; "GLM-5.3"; "100%" ] in
+  if not (String.equal "||246.5M|" (show_seen model_share)) then panic (show_seen model_share);
+  let credits =
+    Oasis.Observe.extract [ "Available credits"; "Manage credits and usage"; "15,028"; "Purchased credits"; "Info"; "5,000" ]
+  in
+  if not (String.equal "||15028 credits|" (show_seen credits)) then panic (show_seen credits);
+  Ok ()
+
+let test_observe_ignores_quoted_plan = fun _ctx ->
+  let s =
+    Oasis.Observe.extract
+      [ "这一页的树里有"; "Super"; "，还有每周额度"; "30%"; "和重置日"; "11 月 12 日"; "Plan & Usage" ]
+  in
+  let actual = show_seen s in
+  if not (String.equal "|||" actual) then panic actual;
+  Ok ()
+
 let test_setup_merge_noop_keeps_text = fun _ctx ->
   Test.assert_equal ~expected:user_config ~actual:(Setup.merge ~text:user_config no_choices);
   Ok ()
@@ -4253,6 +4324,12 @@ let tests =
     case ~size:Test.Large "gateway: decisions.jsonl survives a restart" test_gateway_decisions_survive_restart;
     case ~size:Test.Large "gateway: streaming usage chunk feeds the ledger" test_gateway_stream_usage_recorded;
     case "thread: history messages are oldest first" test_thread_history_oldest_first;
+    case "observe: plan page yields tier, ratio, and reset" test_observe_plan_page;
+    case "observe: chat text is not a reading" test_observe_ignores_chat;
+    case "observe: token fraction beside usage" test_observe_tokens_near_usage;
+    case "observe: token total beside a token caption" test_observe_token_total;
+    case "observe: snapshot tree is read from data.tree" test_observe_snapshot_tree;
+    case "observe: a quoted plan inside chat is not a reading" test_observe_ignores_quoted_plan;
     case "setup: merge with no choices keeps the file byte for byte" test_setup_merge_noop_keeps_text;
     case "setup: merge toggles, adds, extends routes, keeps user lines" test_setup_merge_changes;
     case "setup: fresh config keeps skeleton order" test_setup_fresh_skeleton_order;

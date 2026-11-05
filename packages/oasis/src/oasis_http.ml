@@ -127,6 +127,7 @@ let build_trail = fun (state : state) ->
           Trail.get "/api/workspace/file" (handle_workspace_file state);
           Trail.get "/api/alerts" (handle_list_alerts state);
           Trail.post "/api/inbox/reply" (handle_inbox_reply state);
+          Trail.get "/api/app-usage" (fun ctx -> Trail.json ctx (Oasis_observe.status_json ()));
           Trail.get "/api/setup/scan" (Oasis_setup_api.handle_scan state);
           Trail.post "/api/setup/verify" (Oasis_setup_api.handle_verify state);
           Trail.post "/api/setup/apply" (Oasis_setup_api.handle_apply state);

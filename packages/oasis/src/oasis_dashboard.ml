@@ -329,6 +329,7 @@ body.resizing{cursor:col-resize;user-select:none}
 </section>
 
 <section class="diag" id="view-diag">
+  <div class="card" style="margin-bottom:12px"><h3>应用里看到的用量</h3><div id="app-usage-box" style="font-size:12px;line-height:1.8"></div></div>
   <div class="grid">
     <div class="card"><h3>账户明细</h3><div style="overflow-x:auto"><table class="dt-table" id="acc-table"></table></div></div>
     <div class="card"><h3>原始路由决策 <span class="dim">最近 20 条 + 实时</span></h3><div id="log"></div></div>
@@ -1128,7 +1129,27 @@ async function sendReply() {
   refreshInbox();
   toast('已回复 ' + to);
 }
-function refreshDiag() { renderAccTable(); refreshDecisions(); refreshAgentsDiag(); refreshActivity(); refreshInbox(); }
+async function refreshAppUsage() {
+  const box = $('app-usage-box');
+  if (!box) return;
+  let data;
+  try { data = await (await fetch('/api/app-usage')).json(); }
+  catch (e) { box.innerHTML = '<span class="dim">读不到</span>'; return; }
+  const rows = (data.readings || []).filter(r => r.plan || r.usage || r.tokens || r.reset).map(r => {
+    const when = r.seen_unix ? new Date(r.seen_unix * 1000).toLocaleString() : '';
+    const bits = [r.plan, r.usage, r.tokens, r.reset].filter(Boolean).map(esc).join(' · ');
+    return '<div><span class="mono">' + esc(r.app) + '</span> ' + bits + ' <span class="muted">' + esc(when) + '</span></div>';
+  });
+  let head = '';
+  if (!data.allowed) head = '<div class="dim">没有允许。打开右上角「设置」，勾选「读取应用里的用量」。</div>';
+  else if (data.note === 'no_tool') head = '<div class="dim">已允许，但这台机器没有 agent-desktop，所以还看不到。</div>';
+  else if (data.note === 'permission') head = '<div class="dim">已允许，但系统还没把辅助功能权限给 Oasis。在「隐私与安全性 → 辅助功能」里打开 Oasis，或打开启动它的终端。</div>';
+  else if (data.note && data.note.indexOf('idle:') === 0) head = '<div class="dim">已允许。看到 ' + esc(data.note.slice(5)) + ' 开着，但这一页还没有档位或用量。打开套餐页后，下一次查看（最多约 15 分钟）会记下来。</div>';
+  else if (!rows.length) head = '<div class="dim">已允许。这些应用打开后，画面上露出档位或用量时，这里记下最近一次看到的。</div>';
+  if (data.unread) head += '<div class="dim">' + esc(data.unread) + ' 也开着，但辅助功能树超时，画面读不到。</div>';
+  box.innerHTML = head + rows.join('');
+}
+function refreshDiag() { renderAccTable(); refreshDecisions(); refreshAgentsDiag(); refreshActivity(); refreshInbox(); refreshAppUsage(); }
 
 const NS = 'http://www.w3.org/2000/svg';
 const graphBox = $('graph-box');
@@ -1266,7 +1287,7 @@ loadAlerts();
 loadResources();
 setInterval(loadResources, 5000);
 setInterval(loadAlerts, 15000);
-setInterval(() => { if ($('view-diag').classList.contains('on')) renderAccTable(); }, 5000);
+setInterval(() => { if ($('view-diag').classList.contains('on')) { renderAccTable(); refreshAppUsage(); } }, 5000);
 </script>
 |} ^ Oasis_setup_ui.html ^ {|
 </body>

@@ -74,6 +74,8 @@ let html =
       local: '本机模型', cloud: '云端模型', ollamaOff: 'Ollama 没有运行', models: '模型',
       goals: { balanced: '均衡', fastest: '最快', best: '质量优先', cheapest: '最省钱' },
       sum: (a, g) => `将启用 ${a} 个账户、${g} 个 agent`, nothing: '至少选一个账户或 agent', failed: '保存失败：',
+      observeTitle: '读取应用里的用量',
+      observeHint: '你打开 Cursor、Claude、Codex、Gemini、Kimi、Grok、ZCode、DeepSeek Harness、WorkBuddy、Perplexity 这些应用，并且画面上已经显示档位、用量、token 总数、剩余额度或重置时间时，允许 Oasis 记下来。大约每 15 分钟看一次，不会自己去点开它们，也只保存这几项，不保存聊天内容。',
       setup: '设置',
     },
     en: {
@@ -88,6 +90,8 @@ let html =
       local: 'local models', cloud: 'cloud models', ollamaOff: 'Ollama is not running', models: 'models',
       goals: { balanced: 'Balanced', fastest: 'Fastest', best: 'Best quality', cheapest: 'Cheapest' },
       sum: (a, g) => `${a} account${a === 1 ? '' : 's'} and ${g} agent${g === 1 ? '' : 's'} will be on`, nothing: 'Pick at least one account or agent', failed: 'Save failed: ',
+      observeTitle: 'Read usage shown in agent apps',
+      observeHint: 'When Cursor, Claude, Codex, Gemini, Kimi, Grok, ZCode, DeepSeek Harness, WorkBuddy, or Perplexity is open and the screen already shows the plan, usage, a token total, a remaining credit balance, or a reset time, Oasis may record it. It looks about every 15 minutes, does not open those apps, and keeps only those figures, not the chat.',
       setup: 'Setup',
     },
   };
@@ -98,7 +102,7 @@ let html =
   const GOOD = ['ok', 'rate_limited', 'no_balance'];
   const badgeClass = s => s === 'ok' || s === 'rate_limited' ? 'ok' : s === 'no_balance' ? 'warn' : s === 'checking' ? 'run' : 'err';
 
-  let scan = null, rows = [], goal = 'balanced', showMore = false;
+  let scan = null, rows = [], goal = 'balanced', showMore = false, observe = false;
 
   const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
 
@@ -222,7 +226,8 @@ let html =
       sec(L.accounts, L.accountsHint, (accRows.length ? accRows.map(renderRow).join('') : `<div class="su-empty">${L.none}</div>`) + ollamaOff
         + (extra.length ? `<button class="su-more" id="su-more">${showMore ? L.less : L.more + ` (${extra.length})`}</button>` + (showMore ? extra.map(renderRow).join('') : '') : ''))
       + sec(L.agents, L.agentsHint, agentRows.map(renderRow).join(''))
-      + sec(L.goal, '', `<div class="su-goal">${['balanced', 'fastest', 'best', 'cheapest'].map(g => `<button data-goal="${g}" class="${goal === g ? 'on' : ''}">${L.goals[g]}</button>`).join('')}</div>`);
+      + sec(L.goal, '', `<div class="su-goal">${['balanced', 'fastest', 'best', 'cheapest'].map(g => `<button data-goal="${g}" class="${goal === g ? 'on' : ''}">${L.goals[g]}</button>`).join('')}</div>`)
+      + sec(L.observeTitle, '', `<div class="su-hint">${L.observeHint}</div><label class="su-row"><input type="checkbox" id="su-observe" ${observe ? 'checked' : ''}/><div class="su-name">${L.observeTitle}</div></label>`);
     const [a, g] = counts();
     el('su-sum').textContent = a + g ? L.sum(a, g) : L.nothing;
     el('su-save').disabled = !(a + g);
@@ -230,6 +235,7 @@ let html =
   }
 
   el('su-body').addEventListener('change', e => {
+    if (e.target.id === 'su-observe') { observe = e.target.checked; return; }
     const id = e.target.dataset.on;
     if (id) { const r = row(id); if (r) { r.on = e.target.checked; render(); } }
   });
@@ -250,7 +256,7 @@ let html =
 
   async function save() {
     const L = t();
-    const body = { enable_accounts: {}, enable_agents: {}, add_accounts: [], add_agents: [], keys: {}, goal };
+    const body = { enable_accounts: {}, enable_agents: {}, add_accounts: [], add_agents: [], keys: {}, goal, observe_apps: observe };
     for (const r of rows) {
       if (r.kind === 'account') {
         body.enable_accounts[r.a.name] = r.on;
@@ -290,6 +296,7 @@ let html =
     try { scan = await fetch('/api/setup/scan').then(r => r.json()); }
     catch (e) { el('su-body').innerHTML = `<div class="su-loading">${h(String(e))}</div>`; return; }
     goal = scan.goal || 'balanced';
+    observe = !!scan.observe_apps;
     buildRows(); render();
     for (const r of rows) if (r.status === 'checking') verify(r);
   }

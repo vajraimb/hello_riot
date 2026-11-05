@@ -114,6 +114,7 @@ let handle_scan = fun (state : state) (ctx : Trail.ctx) ->
         ("ollama", Json.obj [ ("running", Json.bool (Option.is_some ollama)); ("models", Json.array (List.map (Option.unwrap_or ollama ~default:[]) ~fn:Json.string)); ("base_url", Json.string S.ollama_base) ]);
         ("agents", Json.array agents);
         ("other_agents", Json.array other_agents);
+        ("observe_apps", Json.bool (Oasis_observe.allowed ()));
       ])
 
 let no_key = fun ~base_url -> S.check_json { S.status = "no_key"; message = ""; base_url; protocol = "openai"; note = ""; models = [] }
@@ -256,6 +257,9 @@ let handle_apply = fun (state : state) (ctx : Trail.ctx) ->
                       | Ok () ->
                           let _ = Sync.Atomic.set state.config config in
                           remove (S.pending_path ());
+                          (match Json.get_field "observe_apps" body |> Option.and_then ~fn:Json.get_bool with
+                          | Some on -> Oasis_observe.set_allowed on
+                          | None -> ());
                           Trail.json ctx
                             (Json.obj
                               [

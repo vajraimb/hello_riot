@@ -78,6 +78,7 @@ let start = fun ~config_path ?(config : Oasis_config.t option) ~port () ->
       Oasis_thread.load state.threads ~path:(threads_file state);
       if Oasis_thread.mark_interrupted state.threads > 0 then Oasis_thread.save state.threads ~path:(threads_file state);
       Oasis_judge.start state;
+      Oasis_observe.start ~data_dir:config.Oasis_config.data_dir;
       if
         String.equal config.Oasis_config.policy.Oasis_config.goal "cheapest"
         && not (Oasis_router.cost_routing_effective config)

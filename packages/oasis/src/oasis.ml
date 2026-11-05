@@ -45,3 +45,4 @@ module Conductor = Oasis_conductor
 module Http = Oasis_http
 module Gateway = Oasis_gateway
 module Setup = Oasis_setup
+module Observe = Oasis_observe
