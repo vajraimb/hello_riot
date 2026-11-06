@@ -313,18 +313,60 @@ let agent_specs = [
     install_hint = "https://x.ai/cli";
   };
   {
-    aid = "opencode";
-    alabel = "opencode";
-    command = "opencode";
-    args = [ "run"; "{prompt}" ];
-    capabilities = [ "terminal"; "files" ];
-    atier = 4;
-    astrengths = [ "coding" ];
+    aid = "codex_cli";
+    alabel = "Codex";
+    command = "codex";
+    args = [ "exec"; "--skip-git-repo-check"; "--dangerously-bypass-approvals-and-sandbox"; "{prompt}" ];
+    capabilities = [ "terminal"; "files"; "web" ];
+    atier = 5;
+    astrengths = [ "coding"; "analysis"; "general" ];
     acontext = 200000;
     alatency = "slow";
     env_passthrough = [];
-    login_hint = "opencode auth login";
-    install_hint = "curl -fsSL https://opencode.ai/install | bash";
+    login_hint = "codex login";
+    install_hint = "Install the Codex app";
+  };
+  {
+    aid = "zcode";
+    alabel = "ZCode";
+    command = "zcode";
+    args = [ "--surface"; "terminal"; "--mode"; "yolo"; "--prompt"; "{prompt}" ];
+    capabilities = [ "terminal"; "files"; "web" ];
+    atier = 4;
+    astrengths = [ "coding"; "general" ];
+    acontext = 200000;
+    alatency = "slow";
+    env_passthrough = [];
+    login_hint = "zcode login";
+    install_hint = "Install the ZCode app";
+  };
+  {
+    aid = "deepseek_harness";
+    alabel = "DeepSeek Harness";
+    command = "dsh";
+    args = [ "--profile"; "headless"; "{prompt}" ];
+    capabilities = [ "terminal"; "files"; "web" ];
+    atier = 4;
+    astrengths = [ "coding"; "general" ];
+    acontext = 128000;
+    alatency = "slow";
+    env_passthrough = [];
+    login_hint = "Open DeepSeek Harness and sign in";
+    install_hint = "Install the DeepSeek Harness app";
+  };
+  {
+    aid = "workbuddy";
+    alabel = "WorkBuddy";
+    command = "codebuddy";
+    args = [ "-p"; "--output-format"; "text"; "--dangerously-skip-permissions"; "{prompt}" ];
+    capabilities = [ "terminal"; "files"; "web" ];
+    atier = 4;
+    astrengths = [ "coding"; "general" ];
+    acontext = 200000;
+    alatency = "slow";
+    env_passthrough = [];
+    login_hint = "In a terminal run codebuddy, then /login";
+    install_hint = "Install the WorkBuddy app";
   };
 ]
 

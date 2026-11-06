@@ -3285,6 +3285,50 @@ let test_gateway_committee = fun _ctx ->
         )
     )
 
+(** A committee member may be a local agent. Bare names still mean accounts
+    when an account of that name exists. *)
+let test_gateway_committee_includes_agent = fun _ctx ->
+  match start_mocks 1 with
+  | Error e -> Error e
+  | Ok mocks -> (
+      let m = List.get_unchecked mocks ~at:0 in
+      Mock.set_scenario m { (Mock.default_scenario) with body = openai_ok_body ~content:"from-api" };
+      let account =
+        { (mk_account ~models:[ "m-x" ] "acc_api") with Config.base_url = "http://127.0.0.1:" ^ Int.to_string m.pool.port }
+      in
+      let config =
+        mk_config_agents
+          ~accounts:[ account ]
+          ~agents:[ mk_agent ~args:[ fix "agent_ok.sh" ] "agent_b" ]
+          ~kb:[ mk_kb_model "m-x" ]
+          ~routes:[]
+          ~max_fallback:1
+      in
+      match Gateway.start ~config_path:None ~config ~port:0 () with
+      | Error e -> Error ("gateway: " ^ e)
+      | Ok gw -> (
+          let post members =
+            gw_post ~port:gw.port ~path:"/v1/chat/completions"
+              ~headers:[ ("Content-Type", "application/json"); ("X-Oasis-Committee", members) ]
+              ~body:
+                (Json.to_string
+                  (Json.obj [ ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "q") ] ]) ]))
+          in
+          match post "acc_api,agent:agent_b" with
+          | Error e -> Error e
+          | Ok (status, resp) -> (
+              Test.assert_equal ~expected:200 ~actual:status;
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "汇总（");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "## acc_api");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "from-api");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "## agent_b（agent）");
+              Test.assert_equal ~expected:true ~actual:(String.contains resp "hello from fake agent");
+              match post "acc_api,agent:missing" with
+              | Error e -> Error e
+              | Ok (status2, _) ->
+                  Test.assert_equal ~expected:400 ~actual:status2;
+                  Ok ())))
+
 let chat_body = fun text ->
   Json.to_string
     (Json.obj [ ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string text) ] ]) ])
@@ -3766,6 +3810,20 @@ let test_observe_ignores_quoted_plan = fun _ctx ->
   let actual = show_seen s in
   if not (String.equal "|||" actual) then panic actual;
   Ok ()
+
+let test_bundled_agents_take_a_prompt = fun _ctx ->
+  let ids = [ "codex_cli"; "zcode"; "deepseek_harness"; "workbuddy" ] in
+  let rec go ids =
+    match ids with
+    | [] -> Ok ()
+    | id :: rest -> (
+        match Oasis.Setup.find_agent_spec id with
+        | None -> Error ("missing agent spec " ^ id)
+        | Some a ->
+            if List.any a.Oasis.Setup.args ~fn:(String.equal "{prompt}") then go rest else Error ("agent spec has no prompt slot " ^ id)
+      )
+  in
+  go ids
 
 let test_setup_merge_noop_keeps_text = fun _ctx ->
   Test.assert_equal ~expected:user_config ~actual:(Setup.merge ~text:user_config no_choices);
@@ -4259,6 +4317,7 @@ let tests =
     case "quality: ratings blend into fit" test_quality_blend;
     case "committee: members and feed events" test_committee_members_and_feed;
     case "gateway: committee answers and synthesis" test_gateway_committee;
+    case "gateway: committee can include an agent" test_gateway_committee_includes_agent;
     case "gateway: thread follow-up carries the conversation" test_gateway_thread_carries_history;
     case ~size:Test.Large "agent: tree dies with the gateway" test_agent_dies_with_gateway;
     case "thread: running turns become interrupted on restart" test_thread_marks_interrupted_turns;
@@ -4330,6 +4389,7 @@ let tests =
     case "observe: token total beside a token caption" test_observe_token_total;
     case "observe: snapshot tree is read from data.tree" test_observe_snapshot_tree;
     case "observe: a quoted plan inside chat is not a reading" test_observe_ignores_quoted_plan;
+    case "setup: bundled agent CLIs take a prompt" test_bundled_agents_take_a_prompt;
     case "setup: merge with no choices keeps the file byte for byte" test_setup_merge_noop_keeps_text;
     case "setup: merge toggles, adds, extends routes, keeps user lines" test_setup_merge_changes;
     case "setup: fresh config keeps skeleton order" test_setup_fresh_skeleton_order;

@@ -333,6 +333,17 @@ let push_step = fun (t : task) ~agent (step : Json.t) ->
           "step"
           ((("step", Json.string kind) :: ("agent", Json.string agent) :: ("open", Json.bool (Oasis_steps.is_delta step)) :: fields)))
 
+(** [agent:name] / [account:name] are stored that way so a follow-up calls
+    the same kind. The timeline shows the bare name. *)
+let member_label = fun m ->
+  let cut prefix =
+    let n = String.length prefix in
+    String.sub m ~offset:n ~len:(String.length m - n)
+  in
+  if String.starts_with ~prefix:"agent:" m then cut "agent:" ^ "（agent）"
+  else if String.starts_with ~prefix:"account:" m then cut "account:"
+  else m
+
 let apply_event = fun (t : task) ~type_ (data : Json.t) ->
   let t = { t with updated_ms = now_ms () } in
   match type_ with
@@ -432,7 +443,7 @@ let apply_event = fun (t : task) ~type_ (data : Json.t) ->
         Json.get_field "members" data |> Option.and_then ~fn:Json.get_array |> Option.unwrap_or ~default:[]
         |> List.filter_map ~fn:Json.get_string
       in
-      let text = "委员会：" ^ String.concat "、" members ^ " 并行作答，都答完后由路由器选一个模型汇总" in
+      let text = "委员会：" ^ String.concat "、" (List.map members ~fn:member_label) ^ " 并行作答，都答完后由路由器选一个模型汇总" in
       let note = if String.is_empty t.category_note then text else t.category_note ^ "；" ^ text in
       push { t with mode = "committee"; category_note = note; route_summary = note } (entry "route" [ ("text", Json.string text) ])
   | "committee_member" ->

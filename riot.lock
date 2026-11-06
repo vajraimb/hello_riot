@@ -1,6 +1,6 @@
 format_version = 1
 
-dependency_hash = "968256c12e1acbbb"
+dependency_hash = "b833e3be76679046"
 
 [[packages]]
 name = "oasis_net"
@@ -14,7 +14,7 @@ dev_dependencies = []
 name = "oasis"
 root = "packages/oasis"
 provenance = { kind = "workspace" }
-dependencies = [{ name = "oasis_net", package = { name = "oasis_net" } }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
+dependencies = [{ name = "kernel", version = "0.0.43", sha256 = "8b91b1fb9db10cbc312239435ec5e1d57c4166a3c89c803670b44a06a4476a5e" }, { name = "oasis_net", package = { name = "oasis_net" } }, { name = "std", version = "0.0.43", sha256 = "3d241ded30eb41610d5afedbb749ac6d2ca9a5832ca48649d781d4b6563f8b63" }]
 build_dependencies = []
 dev_dependencies = []
 

@@ -125,7 +125,7 @@ let tools_list = fun () ->
       tool
         ~name:"oasis_agent_task"
         ~description:
-          "Send a task to a local coding agent (Claude Code, opencode, gemini, codex) through Oasis's agent pool. Use for tasks that need tools: editing files, running commands, browsing. Returns immediately with a task_id; poll oasis_task_status for the result (agents take minutes)."
+          "Send a task to a local coding agent (Claude Code, Gemini CLI, Codex) through Oasis's agent pool. Use for tasks that need tools: editing files, running commands, browsing. Returns immediately with a task_id; poll oasis_task_status for the result (agents take minutes)."
         ~input_schema:
           (Json.obj
             [

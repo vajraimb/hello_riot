@@ -390,7 +390,7 @@ let handle_chat = fun (state : state) (ctx : Trail.ctx) ->
         | _ -> [])
   in
   if not (List.is_empty committee) then
-    Oasis_committee.handle state ctx body ~members:committee ~category ~goal ~request_id
+    Oasis_committee.handle state ctx body ~members:committee ~category ~goal ~request_id ~workspace:thread_id
   else
   let mode =
     match get_header ctx "x-oasis-mode" with

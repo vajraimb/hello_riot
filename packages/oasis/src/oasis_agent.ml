@@ -3,8 +3,8 @@ open Std.Collections
 
 module Json = Std.Data.Json
 
-(** Local AI-agent adapters: run headless agent CLIs (Claude Code, opencode,
-    gemini, codex) as subprocesses and expose their output as chat streams.
+(** Local AI-agent adapters: run headless agent CLIs (Claude Code, Gemini CLI,
+    Codex) as subprocesses and expose their output as chat streams.
     Agent subprocesses live on blocking lanes. They run until they exit or
     are cancelled; a watchdog kills them only when [timeout_s] > 0 (set by
     config or by the caller). *)
@@ -33,7 +33,7 @@ type agent = {
 
 type Message.t +=
   | Agent_line of int * string
-  | Agent_done of int * int
+  | Agent_done of int * int * string
   | Agent_timeout of int
   | Agent_spawned of int * Process.t
 
@@ -69,8 +69,10 @@ let command_name = fun (a : agent) ->
     cursor-agent, gemini, grok; kimi per its help). *)
 let default_resume_args = fun name ->
   match name with
-  | "claude" | "cursor-agent" | "gemini" | "grok" -> [ "--resume"; "{session}" ]
+  | "claude" | "cursor-agent" | "gemini" | "grok" | "codebuddy" -> [ "--resume"; "{session}" ]
   | "kimi" -> [ "--session"; "{session}" ]
+  | "zcode.cjs" -> [ "--resume"; "{session}" ]
+  | "dsh" -> [ "--session-id"; "{session}" ]
   | _ -> []
 
 let resume_args = fun (a : agent) ->
@@ -187,6 +189,15 @@ let resolve_workdir = fun (a : agent) (requested : string option) ->
     particular) is dropped. *)
 let base_env_keys = [ "PATH"; "LANG"; "LC_ALL"; "TERM"; "USER"; "LOGNAME"; "SHELL"; "TMPDIR" ]
 
+(** Variables a known CLI needs on top of [child_env]. WorkBuddy otherwise
+    downloads its built-in plugin marketplaces before answering. That
+    download writes nothing to stdout, so the run looks empty until it is
+    cancelled. *)
+let cli_env = fun (a : agent) ->
+  match command_name a with
+  | "codebuddy" -> [ ("CODEBUDDY_SKIP_BUILTIN_MARKETPLACE", "1") ]
+  | _ -> []
+
 let child_env = fun (a : agent) ->
   let inherited =
     base_env_keys @ a.env_passthrough
@@ -199,9 +210,17 @@ let child_env = fun (a : agent) ->
   let home =
     if not (String.is_empty a.home) then Some a.home else Env.var Env.String ~name:"HOME"
   in
-  match home with
-  | Some h -> ("HOME", h) :: inherited
-  | None -> inherited
+  let base =
+    match home with
+    | Some h -> ("HOME", h) :: inherited
+    | None -> inherited
+  in
+  let extra = cli_env a in
+  let base =
+    List.filter base ~fn:(fun (k, _) ->
+      not (List.any extra ~fn:(fun (ek, _) -> String.equal ek k)))
+  in
+  extra @ base
 
 (* ---------- execution ---------- *)
 
@@ -255,7 +274,7 @@ let spawn_proc = fun ~(agent : agent) ~args () ->
     {
       Process.stdin = Process.Stdin.Null;
       stdout = Process.Stdout.Pipe;
-      stderr = Process.Stderr.Null;
+      stderr = Process.Stderr.Pipe;
     }
   in
   let workdir =
@@ -342,22 +361,55 @@ let feed_lines = fun ~pending ~text ~on_line ->
   in
   loop ()
 
-(** Poll-based reader: [File.read] chunks while the process lives; after exit
-    drain the tail once. Never relies on [File.read_line] (its EOF behavior
-    hangs on pipes in this runtime). *)
+(** Keep the tail of [s], capped at [n] bytes. Agent stderr is only used
+    when the process fails, and the useful line is usually the last one. *)
+let clip_tail = fun s n ->
+  let len = String.length s in
+  if len <= n then s else String.sub s ~offset:(len - n) ~len:n
+
+(** The CLI's own "please log in" line, with a short lead so the dashboard
+    (Chinese) says what to do. *)
+let explain_note = fun note ->
+  let note =
+    String.split ~by:"\n" note
+    |> List.filter ~fn:(fun line -> not (String.contains line "ioreg:"))
+    |> String.concat "\n"
+    |> String.trim
+  in
+  if String.is_empty note then ""
+  else if String.contains note "use /login" then
+    "WorkBuddy 的命令行还没登录。打开终端运行 codebuddy，输入 /login 完成登录后再试。\n" ^ note
+  else
+    note
+
+(** Poll both pipes without [Fs.File.read]. That helper waits until one fd
+    is readable, so a quiet stderr stalls the loop while stdout fills and
+    the CLI blocks on its own write. Returns the stderr tail. *)
 let drain_proc = fun ~proc ~on_line () ->
   let pending = ref "" in
+  let err = ref "" in
   let raw = IO.Bytes.create ~size:4096 in
-  let rec read_once () =
-    match Process.stdout proc with
-    | None -> ()
+  let read_file = fun file ~on_chunk ->
+    match file with
+    | None -> false
     | Some file -> (
-        match Fs.File.read file raw ~offset:0 ~len:4096 with
+        match Kernel.Fs.File.read file raw ~pos:0 ~len:4096 with
         | Ok n when n > 0 ->
             let chunk = IO.Bytes.to_string raw |> fun s -> String.sub s ~offset:0 ~len:n in
-            pending := feed_lines ~pending:!pending ~text:chunk ~on_line
-        | _ -> ()
+            on_chunk chunk;
+            true
+        | _ -> false
       )
+  in
+  let read_once () =
+    let out =
+      read_file (Process.stdout proc) ~on_chunk:(fun chunk ->
+        pending := feed_lines ~pending:!pending ~text:chunk ~on_line)
+    in
+    let err_got =
+      read_file (Process.stderr proc) ~on_chunk:(fun chunk -> err := clip_tail (!err ^ chunk) 2000)
+    in
+    out || err_got
   in
   let exited () =
     match Process.try_wait proc with
@@ -365,21 +417,21 @@ let drain_proc = fun ~proc ~on_line () ->
     | _ -> false
   in
   let rec loop () =
+    let got = read_once () in
     if exited () then (
-      read_once ();
+      let _ = read_once () in
       if not (String.is_empty !pending) then (
         on_line !pending;
         pending := ""
       )
-    ) else (
-      read_once ();
-      if not (exited ()) then (
-        sleep (Time.Duration.from_millis 20);
-        loop ()
-      )
+    ) else if got then loop ()
+    else (
+      Kernel.Thread.sleep_ns (Time.Duration.to_nanos (Time.Duration.from_millis 20));
+      loop ()
     )
   in
-  loop ()
+  loop ();
+  explain_note !err
 
 let exit_code = fun ~proc ->
   match Process.try_wait proc with
@@ -407,17 +459,23 @@ let collect = fun ?(on_line = fun (_ : string) -> ()) ?(on_spawn = fun (_ : Proc
         let text, _ = consume_line jn ~command:agent.command line in
         buf := !buf ^ text
       in
-      drain_proc ~proc ~on_line ();
+      let note = drain_proc ~proc ~on_line () in
       let code = exit_code ~proc in
       let _ = Process.close proc in
-      if code = 0 then
+      let with_note = fun msg -> if String.is_empty note then msg else msg ^ ": " ^ note in
+      (* WorkBuddy reports "not logged in" on stderr and still exits 0. *)
+      if code = 0 && not (String.is_empty (String.trim !buf)) then
+        Ok !buf
+      else if code = 0 && not (String.is_empty note) then
+        Error note
+      else if code = 0 then
         Ok !buf
       else if code = 137 && agent.timeout_s > 0 then
-        Error ("agent timeout (" ^ Int.to_string agent.timeout_s ^ "s)")
+        Error (with_note ("agent timeout (" ^ Int.to_string agent.timeout_s ^ "s)"))
       else if code = 137 then
-        Error "agent killed (SIGKILL)"
+        Error (with_note "agent killed (SIGKILL)")
       else
-        Error ("agent exited with code " ^ Int.to_string code)
+        Error (with_note ("agent exited with code " ^ Int.to_string code))
 
 (** Streaming run; call ONLY from a blocking lane. Lines go to [to_pid] as
     [Agent_line], the exit code as [Agent_done]. *)
@@ -428,7 +486,7 @@ let stream = fun ~(agent : agent) ~model ~prompt ~to_pid ~leg () ->
   in
   match spawn_proc ~agent ~args () with
   | Error e ->
-      send to_pid (Agent_done (leg, -1));
+      send to_pid (Agent_done (leg, -1, ""));
       Ok ()
   | Ok proc ->
       send to_pid (Agent_spawned (leg, proc));
@@ -436,8 +494,8 @@ let stream = fun ~(agent : agent) ~model ~prompt ~to_pid ~leg () ->
       let on_line line =
         send to_pid (Agent_line (leg, line))
       in
-      drain_proc ~proc ~on_line ();
+      let note = drain_proc ~proc ~on_line () in
       let code = exit_code ~proc in
       let _ = Process.close proc in
-      send to_pid (Agent_done (leg, code));
+      send to_pid (Agent_done (leg, code, note));
       Ok ()

@@ -169,16 +169,6 @@ strengths = ["coding", "general"]
 latency = "slow"
 enabled = false
 
-[[agents]]
-name = "opencode"
-command = "opencode"
-args = ["run", "{prompt}"]
-capabilities = ["terminal", "files"]
-tier = 4
-strengths = ["coding"]
-latency = "slow"
-enabled = false
-
 # ---------------------------------------------------------------------------
 # Routes: which accounts may serve each category. / 每个类别允许哪些账户执行。
 # ---------------------------------------------------------------------------

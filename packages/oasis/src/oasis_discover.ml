@@ -58,11 +58,26 @@ let locate_command = fun ~home cmd ->
       "/opt/bin";
     ]
   in
-  List.find dirs ~fn:(fun d ->
-    match Path.from_string (d ^ "/" ^ cmd) with
-    | Error _ -> false
-    | Ok path -> (match Fs.exists path with Ok true -> true | _ -> false))
-  |> Option.map ~fn:(fun d -> d ^ "/" ^ cmd)
+  let path_hit =
+    List.find dirs ~fn:(fun d ->
+      match Path.from_string (d ^ "/" ^ cmd) with
+      | Error _ -> false
+      | Ok path -> (match Fs.exists path with Ok true -> true | _ -> false))
+    |> Option.map ~fn:(fun d -> d ^ "/" ^ cmd)
+  in
+  match path_hit with
+  | Some p -> Some p
+  | None ->
+      (* These apps ship a headless CLI inside the bundle, not on PATH. *)
+      let bundled =
+        match cmd with
+        | "codex" -> [ "/Applications/Codex.app/Contents/Resources/codex" ]
+        | "zcode" -> [ "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs" ]
+        | "dsh" -> [ "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" ]
+        | "codebuddy" -> [ "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy" ]
+        | _ -> []
+      in
+      List.find bundled ~fn:(fun p -> match Path.from_string p with Error _ -> false | Ok path -> (match Fs.exists path with Ok true -> true | _ -> false))
 
 let find_command = fun ~home cmd -> Option.is_some (locate_command ~home cmd)
 
@@ -197,15 +212,15 @@ let scan = fun ~home ->
   in
   [
     mk "claude_code" "claude" (find_command ~home "claude") (claude_logged_in ~home) (claude_activity ~home ~now_s);
-    mk "opencode" "opencode" (find_command ~home "opencode")
-      (file_exists (home ^ "/.local/share/opencode/auth.json"))
-      (None, []);
     mk "gemini_cli" "gemini" (find_command ~home "gemini")
       (dir_exists (home ^ "/.gemini") || dir_exists (home ^ "/.config/gemini"))
       (None, []);
     mk "codex_cli" "codex" (find_command ~home "codex")
       (file_exists (home ^ "/.codex/auth.json"))
       (None, []);
+    mk "zcode" "zcode" (find_command ~home "zcode") (file_exists (home ^ "/.zcode/v2/config.json")) (None, []);
+    mk "deepseek_harness" "dsh" (find_command ~home "dsh") (dir_exists (home ^ "/.dsh")) (None, []);
+    mk "workbuddy" "codebuddy" (find_command ~home "codebuddy") (dir_exists (home ^ "/.workbuddy")) (None, []);
     mk "kimi_cli" "kimi" (find_command ~home "kimi") (dir_exists (home ^ "/.kimi")) (None, []);
     mk "grok_cli" "grok" (find_command ~home "grok" || file_exists (home ^ "/.grok/bin/grok"))
       (dir_exists (home ^ "/.grok"))

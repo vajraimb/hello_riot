@@ -8,6 +8,7 @@ path = "src/oasis.ml"
 
 [dependencies]
 std = "*"
+kernel = "*"
 oasis_net = { path = "../net" }
 
 [[bin]]

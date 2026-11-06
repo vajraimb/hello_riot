@@ -43,7 +43,6 @@ let login_command = fun command ->
   | "gemini" -> "gemini   # 交互式完成登录后退出"
   | "kimi" -> "kimi login"
   | "grok" -> "grok login"
-  | "opencode" -> "opencode auth login"
   | c -> c ^ " login"
 
 let fix_for_error = fun ~(err : string) ~(key_env : string option) ~(host : string) ->

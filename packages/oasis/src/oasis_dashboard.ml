@@ -66,7 +66,7 @@ kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid
 body.resizing{cursor:col-resize;user-select:none}
 .msel{position:relative}
 .msel > button{background:var(--bg);border:1px solid var(--line2);border-radius:6px;padding:6px 10px;color:var(--text);cursor:pointer;font:inherit}
-.pop{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:20;background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:4px 0;min-width:280px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.pop{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:20;background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:4px 0;min-width:280px;max-height:320px;overflow:auto;box-shadow:0 8px 24px rgba(0,0,0,.45)}
 .pop.on{display:block}
 .pop label{display:flex;gap:8px;align-items:center;padding:5px 10px;cursor:pointer;font-size:12px}
 .pop label:hover{background:var(--line)}
@@ -434,10 +434,26 @@ function renderPicker() {
     if ($('agent-pick')) $('agent-pick').onchange = e => localStorage.setItem('oasis_pick', e.target.value);
   } else if (v === 'committee') {
     const accs = accCache.filter(a => a.enabled);
-    if (accs.length) committee = committee.filter(n => accs.some(a => a.name === n));
-    box.innerHTML = '<div class="msel"><button id="cm-btn" type="button" title="选 2–3 个账户，汇总模型由路由器自动挑">成员 ' + committee.length + '/3 ▾</button><div class="pop" id="cm-pop">' +
-      (accs.length ? accs.map(a => '<label class="' + (accHealth(a) === 'ok' ? '' : 'off') + '"><input type="checkbox" value="' + esc(a.name) + '"' + (committee.includes(a.name) ? ' checked' : '') + '><span class="mono">' + esc(a.name) + '</span><span class="dim">' + esc((a.models || [])[0] || '') + '</span></label>').join('') : '<div class="dim" style="padding:6px 10px">加载账户…</div>') +
-      '<div class="dim" style="padding:6px 10px;border-top:1px solid var(--line);margin-top:4px">选 2–3 个；各家并行作答，再由路由器选一个模型汇总</div></div></div>';
+    const ags = agtCache.filter(a => a.enabled);
+    if (accs.length || ags.length) {
+      const allow = new Set([...accs.map(a => 'account:' + a.name), ...ags.map(a => 'agent:' + a.name)]);
+      committee = committee.map(n => {
+        if (n.startsWith('account:') || n.startsWith('agent:')) return n;
+        if (accs.some(a => a.name === n)) return 'account:' + n;
+        if (ags.some(a => a.name === n)) return 'agent:' + n;
+        return n;
+      }).filter(n => allow.has(n));
+      localStorage.setItem('oasis_committee', JSON.stringify(committee));
+    }
+    const row = (id, health, name, sub) => '<label class="' + (health === 'ok' ? '' : 'off') + '"><input type="checkbox" value="' + esc(id) + '"' + (committee.includes(id) ? ' checked' : '') + '><span class="mono">' + esc(name) + '</span><span class="dim">' + esc(sub) + '</span></label>';
+    const accRows = accs.map(a => row('account:' + a.name, accHealth(a), a.name, (a.models || [])[0] || '')).join('');
+    const agRows = ags.map(a => row('agent:' + a.name, agtHealth(a), a.name, 'agent')).join('');
+    const groups = (accs.length || ags.length)
+      ? (accRows ? '<div class="dim" style="padding:6px 10px 2px">API 账户</div>' + accRows : '') + (agRows ? '<div class="dim" style="padding:6px 10px 2px">Agent</div>' + agRows : '')
+      : '<div class="dim" style="padding:6px 10px">加载账户和 agent…</div>';
+    box.innerHTML = '<div class="msel"><button id="cm-btn" type="button" title="选 2–3 个账户或 agent，汇总模型由路由器自动挑">成员 ' + committee.length + '/3 ▾</button><div class="pop" id="cm-pop">' +
+      groups +
+      '<div class="dim" style="padding:6px 10px;border-top:1px solid var(--line);margin-top:4px">选 2–3 个账户或 agent；各家并行作答，再由路由器选一个模型汇总</div></div></div>';
     $('cm-btn').onclick = e => { e.stopPropagation(); $('cm-pop').classList.toggle('on'); };
     $('cm-pop').onclick = e => e.stopPropagation();
     $('cm-pop').querySelectorAll('input').forEach(cb => cb.onchange = () => {
@@ -461,7 +477,7 @@ async function run() {
   const cat = $('category').value;
   const pick = cat === 'pick' ? ($('agent-pick') && $('agent-pick').value) : '';
   if (cat === 'pick' && !pick) { toast('没有可选的 agent'); return; }
-  if (cat === 'committee' && committee.length < 2) { toast('委员会至少选 2 个账户'); $('cm-pop') && $('cm-pop').classList.add('on'); return; }
+  if (cat === 'committee' && committee.length < 2) { toast('委员会至少选 2 个成员'); $('cm-pop') && $('cm-pop').classList.add('on'); return; }
   const stream = cat !== 'committee';
   const headers = {};
   if (mode) headers['X-Oasis-Mode'] = mode;

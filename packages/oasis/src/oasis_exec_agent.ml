@@ -425,6 +425,7 @@ let handle_chat_agent = fun ?pinned ?prefer ?thread ?workspace (state : state) (
                     ("attempts", Json.int (List.length !attempts));
                     ("ok", Json.bool false);
                     ("error", Json.string ("所有 agent 都失败了，最后一个：" ^ reason));
+                    ("answer", Json.string !sent);
                   ]);
             let _ = write_stream client_stream "data: [DONE]\n\n" in
             send (self ()) (Conductor_done (Ok ()));
@@ -445,7 +446,7 @@ let handle_chat_agent = fun ?pinned ?prefer ?thread ?workspace (state : state) (
             let selector msg =
               match msg with
               | Oasis_agent.Agent_line (_, line) -> Select (`Line line)
-              | Oasis_agent.Agent_done (_, code) -> Select (`Done code)
+              | Oasis_agent.Agent_done (_, code, note) -> Select (`Done (code, note))
               | Oasis_agent.Agent_timeout _ -> Select `Timeout
               | Oasis_agent.Agent_spawned (_, p) -> Select (`Spawned p)
               | Task_cancel reason -> Select (`Cancel reason)
@@ -498,10 +499,24 @@ let handle_chat_agent = fun ?pinned ?prefer ?thread ?workspace (state : state) (
                     | Ok () -> loop ()
                 )
               )
-            | `Done 0 -> finished := true; finish_ok ()
-            | `Done code ->
+            | `Done (code, note) ->
                 finished := true;
-                if finish_fail ("agent exited with code " ^ Int.to_string code) then loop ()
+                let note = String.trim note in
+                let silent = String.is_empty (String.trim !sent) in
+                (* A zero exit with an empty answer and a stderr note is a
+                   failure: WorkBuddy does this when the CLI is not logged in. *)
+                if code = 0 && not (silent && not (String.is_empty note)) then
+                  finish_ok ()
+                else (
+                  (if silent && not (String.is_empty note) then sent := note);
+                  let reason =
+                    if code = 0 then note
+                    else
+                      let base = "agent exited with code " ^ Int.to_string code in
+                      if String.is_empty note then base else base ^ ": " ^ note
+                  in
+                  if finish_fail reason then loop ()
+                )
             | `Timeout ->
                 finished := true;
                 if
@@ -533,8 +548,10 @@ let handle_chat_agent = fun ?pinned ?prefer ?thread ?workspace (state : state) (
         | [] ->
             let decision' = { decision with Oasis_router.attempts = List.rev acc } in
             record_decision state decision';
+            let last_err = match acc with a :: _ -> a.Oasis_router.error |> Option.unwrap_or ~default:"" | [] -> "" in
             emit_task_done
-              ~error:(match acc with a :: _ -> "所有 agent 都失败了，最后一个：" ^ (a.Oasis_router.error |> Option.unwrap_or ~default:"?") | [] -> "")
+              ~error:(if String.is_empty last_err then "所有 agent 都失败了" else "所有 agent 都失败了，最后一个：" ^ last_err)
+              ~answer:last_err
               state ~request_id ~chosen:None ~attempts:(List.length acc) ~ok:false;
             Trail.json
               ~status:Net.Http.Status.BadGateway
