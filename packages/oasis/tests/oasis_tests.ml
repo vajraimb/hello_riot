@@ -703,11 +703,15 @@ let gw_req = fun ~method_ ~port ~path ~headers ~body ->
   match Client.connect_plain addr with
   | Error e -> Error (Client.error_to_string e)
   | Ok conn ->
+      let has_host =
+        List.any headers ~fn:(fun (n, _) -> String.equal (String.lowercase_ascii n) "host")
+      in
+      let headers = if has_host then headers else ("Host", "gw") :: headers in
       let req =
         Client.make_request
           ~method_
           ~path
-          ~headers:(("Host", "gw") :: headers)
+          ~headers
           ~body
           ()
       in
@@ -882,7 +886,7 @@ let test_signals_window_and_breaker = fun _ctx ->
 
 (* ---------- M2: scored routing ---------- *)
 
-let mk_snap = fun ?(ema = 200) ?(samples = 1) ?(inflight = 0) ?(breaker_open = false) ?(rpm_used = 0) () ->
+let mk_snap = fun ?(ema = 200) ?(samples = 1) ?(inflight = 0) ?(breaker_open = false) ?(rpm_used = 0) ?(auth_invalid = false) () ->
   {
     Router.latency_ema_ms = ema;
     latency_samples = samples;
@@ -890,6 +894,7 @@ let mk_snap = fun ?(ema = 200) ?(samples = 1) ?(inflight = 0) ?(breaker_open = f
     breaker_open;
     requests_in_window = rpm_used;
     parked = false;
+    auth_invalid;
   }
 
 let mk_scored_lookups = fun ~spent ~day ~snap ->
@@ -954,6 +959,33 @@ let test_router_v2_breaker_blocks = fun _ctx ->
   Test.assert_equal
     ~expected:true
     ~actual:(List.any d.Router.rejected ~fn:(fun r -> String.equal r.Router.reason "circuit_open"));
+  Ok ()
+
+let test_router_v2_auth_rejected_blocks = fun _ctx ->
+  let kb = [ mk_kb_model "m-a" ] in
+  let config =
+    mk_config
+      ~accounts:[ mk_account "kimi_work"; mk_account "acc_b" ]
+      ~kb
+      ~routes:[]
+      ~max_fallback:1
+  in
+  let lookups =
+    mk_scored_lookups
+      ~spent:(fun _ -> 0)
+      ~day:(fun _ -> 0)
+      ~snap:(fun name ->
+        mk_snap ~auth_invalid:(String.equal name "kimi_work") ())
+  in
+  let task = { Router.category = "general"; model = None; est_in_tokens = 10; est_out_tokens = 10 } in
+  let d = Router.route_scored config lookups ~goal:Router.Balanced task in
+  Test.assert_equal ~expected:(Some "acc_b") ~actual:d.Router.chosen;
+  Test.assert_equal
+    ~expected:false
+    ~actual:(List.any d.Router.fallback_order ~fn:(String.equal "kimi_work"));
+  Test.assert_equal
+    ~expected:true
+    ~actual:(List.any d.Router.rejected ~fn:(fun r -> String.equal r.Router.account "kimi_work" && String.equal r.Router.reason "auth_rejected"));
   Ok ()
 
 (* ---------- M2: gateway streaming + seamless handoff ---------- *)
@@ -3277,11 +3309,30 @@ let test_gateway_committee = fun _ctx ->
               Test.assert_equal ~expected:true ~actual:(String.contains resp "汇总（");
               Test.assert_equal ~expected:true ~actual:(String.contains resp "## acc_0\\n\\nanswer-0");
               Test.assert_equal ~expected:true ~actual:(String.contains resp "## acc_1\\n\\nanswer-1");
-              match post "acc_0" with
+              let streamed =
+                Json.to_string
+                  (Json.obj
+                    [
+                      ("stream", Json.bool true);
+                      ("messages", Json.array [ Json.obj [ ("role", Json.string "user"); ("content", Json.string "q") ] ]);
+                    ])
+              in
+              match
+                gw_post ~port:gw.port ~path:"/v1/chat/completions"
+                  ~headers:[ ("Content-Type", "application/json"); ("X-Oasis-Committee", "acc_0, acc_1") ]
+                  ~body:streamed
+              with
               | Error e -> Error e
-              | Ok (status2, _) ->
-                  Test.assert_equal ~expected:400 ~actual:status2;
-                  Ok ())
+              | Ok (st, body) -> (
+                  Test.assert_equal ~expected:200 ~actual:st;
+                  Test.assert_equal ~expected:true ~actual:(String.contains body "data: ");
+                  Test.assert_equal ~expected:true ~actual:(String.contains body "answer-0");
+                  Test.assert_equal ~expected:true ~actual:(String.contains body "[DONE]");
+                  match post "acc_0" with
+                  | Error e -> Error e
+                  | Ok (status2, _) ->
+                      Test.assert_equal ~expected:400 ~actual:status2;
+                      Ok ()))
         )
     )
 
@@ -3674,6 +3725,25 @@ let test_gateway_bearer_auth = fun _ctx ->
             ~expected:401
             ~actual:(status ~method_:"GET" ~path:"/api/accounts?token=s3cret%2F%2B%3D" ~headers:[]);
           Test.assert_equal ~expected:true ~actual:(String.equal (Gateway.percent_decode "s3cret%2F%2B%3D") "s3cret/+=");
+          (* The Mac page uses a loopback Host. The tunnel keeps a public Host
+             and sets CF-Connecting-IP, so those still need the bearer. *)
+          Test.assert_equal
+            ~expected:200
+            ~actual:(status ~method_:"GET" ~path:"/api/accounts" ~headers:[ ("Host", "127.0.0.1:9899") ]);
+          Test.assert_equal
+            ~expected:403
+            ~actual:
+              (status
+                ~method_:"GET"
+                ~path:"/api/accounts"
+                ~headers:[ ("Host", "127.0.0.1:9899"); ("Origin", "https://evil.example") ]);
+          Test.assert_equal
+            ~expected:401
+            ~actual:
+              (status
+                ~method_:"GET"
+                ~path:"/api/accounts"
+                ~headers:[ ("Host", "127.0.0.1:9899"); ("Cf-Connecting-Ip", "203.0.113.8") ]);
           let _ = Env.remove ~var in
           Ok ()
     )
@@ -4357,6 +4427,7 @@ let tests =
     case "signals: release_in_flight without breaker impact" test_signals_release_in_flight;
     case "router v2: cheapest vs fastest goal" test_router_v2_cheapest_goal;
     case "router v2: breaker open rejects account" test_router_v2_breaker_blocks;
+    case "router v2: rejected key is not chosen again" test_router_v2_auth_rejected_blocks;
     case ~size:Test.Large "H1: exact replay is deduplicated (G1)" test_h1_exact_replay;
     case ~size:Test.Large "ws: streaming handoff emits the full event trace" test_ws_events_trace_streaming_handoff;
     case ~size:Test.Large "H2: direct continuation (G1)" test_h2_direct_continuation;

@@ -73,6 +73,7 @@ let start = fun ~config_path ?(config : Oasis_config.t option) ~port () ->
       load_decision_history state;
       let _ = Oasis_inbox.load state.inbox in
       Oasis_signals.load_parked state.signals ~path:(parked_file state);
+      Oasis_signals.load_auth state.signals ~path:(data_path state "auth.json");
       Oasis_signals.load_latency state.signals ~path:(data_path state "latency.json");
       Oasis_quality.load state.quality ~path:(quality_file state);
       Oasis_thread.load state.threads ~path:(threads_file state);

@@ -85,6 +85,7 @@ let bench_lookups =
           breaker_open = false;
           requests_in_window = 0;
           parked = false;
+          auth_invalid = false;
         });
     quality = (fun ~account:_ ~category:_ -> { Oasis.Quality.sum = 0; n = 0 });
   }

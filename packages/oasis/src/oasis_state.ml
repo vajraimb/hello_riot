@@ -209,6 +209,7 @@ let snapshot_of = fun (state : state) account ->
        | _ -> false);
     requests_in_window = s.Oasis_signals.requests_in_window;
     parked = Oasis_signals.is_parked s now;
+    auth_invalid = s.Oasis_signals.auth_invalid;
   }
 
 let make_lookups = fun (state : state) ->

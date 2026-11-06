@@ -317,10 +317,16 @@ let put = fun (t : t) account s ->
   ConcurrentHashMap.insert t ~key:account ~value:s
 
 (** Atomically-ish update via a pure transition. *)
+(* Set by [load_auth] so a rejected key is written through every later update. *)
+let auth_file = ref None
+
+let persist_auth_change = ref (fun (_ : t) -> ())
+
 let update = fun (t : t) account ~fn ->
   let s = get t account in
   let s' = fn s in
   let _ = put t account s' in
+  if not (s.auth_invalid = s'.auth_invalid) then !persist_auth_change t;
   s'
 
 let snapshot = fun (t : t) account -> get t account
@@ -394,6 +400,45 @@ let load_parked = fun (t : t) ~path ->
                 match Json.get_int v with
                 | Some until when until > now ->
                     let _ = update t account ~fn:(fun s -> { s with parked_until_ms = until }) in
+                    ()
+                | _ -> ())
+        )
+    )
+
+(* ---------- rejected-key persistence ---------- *)
+
+(** A 401/403 must survive restarts, otherwise the dashboard shows the account
+    as usable again on every boot. A later success clears the flag and this file. *)
+let save_auth = fun (t : t) ~path ->
+  let entries = ref [] in
+  ConcurrentHashMap.for_each t ~fn:(fun account s ->
+    if s.auth_invalid then entries := (account, Json.bool true) :: !entries);
+  match Path.from_string path with
+  | Error _ -> ()
+  | Ok p ->
+      let _ = Fs.write (Json.to_string (Json.obj !entries)) p in
+      ()
+
+let load_auth = fun (t : t) ~path ->
+  auth_file := Some path;
+  persist_auth_change :=
+    (fun table ->
+      match !auth_file with
+      | None -> ()
+      | Some path -> save_auth table ~path);
+  match Path.from_string path with
+  | Error _ -> ()
+  | Ok p -> (
+      match Fs.read_to_string p with
+      | Error _ -> ()
+      | Ok content -> (
+          match Json.from_string content |> Result.to_option |> Option.and_then ~fn:Json.get_object with
+          | None -> ()
+          | Some fields ->
+              List.for_each fields ~fn:(fun (account, v) ->
+                match Json.get_bool v with
+                | Some true ->
+                    let _ = update t account ~fn:(fun s -> { s with auth_invalid = true }) in
                     ()
                 | _ -> ())
         )

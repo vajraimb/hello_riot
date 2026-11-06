@@ -76,6 +76,7 @@ type account_snapshot = {
   breaker_open: bool;
   requests_in_window: int;
   parked: bool;
+  auth_invalid: bool;
 }
 
 type lookups = {
@@ -417,6 +418,7 @@ let route_scored =
                 let snap = lookups.snapshot name in
                 let breaker_ok = not snap.breaker_open in
                 let parked_ok = not snap.parked in
+                let auth_ok = not snap.auth_invalid in
                 let rpm_ok =
                   if acc.Oasis_config.rpm <= 0 then
                     true
@@ -430,6 +432,7 @@ let route_scored =
                   && parked_ok
                   && breaker_ok
                   && rpm_ok
+                  && auth_ok
                 in
                 if ok then (
                   static_fits := (name, (fit_static, q)) :: !static_fits;
@@ -452,6 +455,8 @@ let route_scored =
                       "quota_parked"
                     else if not breaker_ok then
                       "circuit_open"
+                    else if not auth_ok then
+                      "auth_rejected"
                     else
                       "rpm_exhausted"
                   in

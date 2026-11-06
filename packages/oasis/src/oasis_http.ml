@@ -34,21 +34,57 @@ let host_of_authority = fun authority ->
     | h :: _ -> h
     | [] -> authority
 
-(** With a token configured, everything except the dashboard page needs
+let header_nonempty = fun ctx name ->
+  match get_header ctx name with
+  | Some s -> not (String.equal (String.trim s) "")
+  | None -> false
+
+let request_host = fun ctx ->
+  match get_header ctx "host" with
+  | Some h -> host_of_authority (String.trim h)
+  | None -> ""
+
+(** A browser on this Mac uses a loopback Host and no Cloudflare header.
+    The phone comes through the tunnel, which keeps the public Host and sets
+    [CF-Connecting-IP]. Only that path must present the bearer. *)
+let token_required = fun ctx ->
+  header_nonempty ctx "cf-connecting-ip" || not (Oasis_config.is_loopback_host (request_host ctx))
+
+let origin_is_local = fun ctx ->
+  match get_header ctx "origin" with
+  | None -> true
+  | Some origin ->
+      let authority =
+        match String.split ~by:"://" origin with
+        | [ _; rest ] -> rest
+        | _ -> origin
+      in
+      Oasis_config.is_loopback_host (host_of_authority authority)
+
+(** With a token configured, a public or tunneled request needs
     [Authorization: Bearer] ([?token=] for the WebSocket, which browsers can't
-    send headers on). Without one only loopback peers get through, and a
-    browser [Origin] must name a loopback host so other web pages (or DNS
-    rebinding) can't drive the agents via the permissive CORS headers. *)
+    send headers on). A page opened on this machine does not. Without a token,
+    or for that local page, only loopback peers get through, and a browser
+    [Origin] must name a loopback host so other web pages (or DNS rebinding)
+    can't drive the agents via the permissive CORS headers. *)
 let use_auth = fun (state : state) (ctx : Trail.ctx) ->
   let path = Net.Uri.path (Net.Http.Request.uri ctx.req) in
   let deny status reason =
     Trail.json ~status ctx (Json.obj [ ("error", Json.obj [ ("message", Json.string reason); ("type", Json.string "oasis_auth") ]) ])
   in
+  let allow_local () =
+    if not (Oasis_config.is_loopback_host (Net.Addr.ip ctx.peer)) then
+      deny Net.Http.Status.Forbidden "non-loopback peer and no server.auth_token_env configured"
+    else if origin_is_local ctx then ctx
+    else
+      let origin = match get_header ctx "origin" with Some o -> o | None -> "" in
+      deny Net.Http.Status.Forbidden ("cross-origin request from " ^ origin)
+  in
   if Net.Http.Method.equal (Net.Http.Request.method_ ctx.req) Net.Http.Method.Options then ctx
   else if String.equal path "/" then ctx
   else
     match Oasis_config.auth_token (Sync.Atomic.get state.config) with
-    | Some token -> (
+    | Some token when token_required ctx -> (
         let presented =
           match get_header ctx "authorization" |> Option.and_then ~fn:bearer_of with
           | Some t -> Some t
@@ -59,21 +95,9 @@ let use_auth = fun (state : state) (ctx : Trail.ctx) ->
         | Some _ -> deny Net.Http.Status.Unauthorized "invalid token"
         | None -> deny Net.Http.Status.Unauthorized "missing bearer token"
       )
+    | Some _
     | None ->
-        if not (Oasis_config.is_loopback_host (Net.Addr.ip ctx.peer)) then
-          deny Net.Http.Status.Forbidden "non-loopback peer and no server.auth_token_env configured"
-        else (
-          match get_header ctx "origin" with
-          | None -> ctx
-          | Some origin ->
-              let authority =
-                match String.split ~by:"://" origin with
-                | [ _; rest ] -> rest
-                | _ -> origin
-              in
-              if Oasis_config.is_loopback_host (host_of_authority authority) then ctx
-              else deny Net.Http.Status.Forbidden ("cross-origin request from " ^ origin)
-        )
+        allow_local ()
 
 let use_cors_with_auth = fun ctx ->
   ctx

@@ -29,6 +29,7 @@ let parse_members = fun (header : string) ->
 type Message.t +=
   | Committee_agent_result of (string, string) result
   | Committee_agent_spawned of Process.t
+  | Committee_synth of (string * string) option
 
 (** Runs an agent without forwarding each stdout line back to this actor.
     Line-by-line forwarding fills the mailbox, the reader stops, and the
@@ -299,11 +300,20 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
       | Task_cancel reason -> Select (`Cancel reason)
       | _ -> Skip
     in
+    (* Cloudflare drops a request that sends nothing for about two minutes.
+       A streamed committee writes a comment at least this often. *)
+    let ping = ref (fun () -> ()) in
+    let rec await ~selector =
+      try receive ~selector ~timeout:(Time.Duration.from_secs 15) ()
+      with Receive_timeout ->
+        !ping ();
+        await ~selector
+    in
     let cancelled = ref None in
     let rec collect acc remaining =
       if remaining = 0 then acc
       else
-        match receive ~selector () with
+        match await ~selector with
         | `Cancel reason ->
             List.for_each !kids ~fn:(fun pid -> send pid (Task_cancel reason));
             cancelled := Some reason;
@@ -324,6 +334,7 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
             );
             collect ((i, r) :: acc) (remaining - 1)
     in
+    let finish () =
     watch_task state ~request_id ();
     let results = collect [] n in
     let per_member =
@@ -350,22 +361,25 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
     in
     let cancelled_reply reason =
       unwatch_task state ~request_id;
-      emit_task_done ~cancelled:true ~error:(cancel_text reason) ~answer:sections state ~request_id ~chosen:None ~attempts:n ~ok:false;
-      Trail.json ~status:(Net.Http.Status.from_int 499) ctx
-        (Json.obj [ ("error", Json.string (cancel_error reason)); ("message", Json.string (cancel_text reason)); ("members", members_json) ])
+      let text = cancel_text reason in
+      emit_task_done ~cancelled:true ~error:text ~answer:sections state ~request_id ~chosen:None ~attempts:n ~ok:false;
+      ( Net.Http.Status.from_int 499,
+        Json.obj [ ("error", Json.string (cancel_error reason)); ("message", Json.string text); ("members", members_json) ],
+        text )
     in
+    let (status, payload, text) =
     match answered with
     | _ when Option.is_some !cancelled -> cancelled_reply (Option.unwrap_or !cancelled ~default:"user")
     | [] ->
         unwatch_task state ~request_id;
         let msg = "委员会成员都没能作答" in
         emit_task_done ~error:msg state ~request_id ~chosen:None ~attempts:n ~ok:false;
-        Trail.json ~status:Net.Http.Status.BadGateway ctx (Json.obj [ ("error", Json.string msg); ("members", members_json) ])
+        (Net.Http.Status.BadGateway, Json.obj [ ("error", Json.string msg); ("members", members_json) ], msg)
     | [ (only, _) ] ->
         unwatch_task state ~request_id;
         let content = "只有 " ^ only ^ " 给出了回答，无需汇总。\n\n" ^ sections in
         emit_task_done ~answer:content state ~request_id ~chosen:(Some only) ~attempts:n ~ok:true;
-        Trail.json ctx (completion_json ~request_id ~content [ ("oasis", Json.obj [ ("members", members_json) ]) ])
+        (Net.Http.Status.Ok, completion_json ~request_id ~content [ ("oasis", Json.obj [ ("members", members_json) ]) ], content)
     | _ ->
         let question = Oasis_feed.last_user_text body in
         let prompt = synthesis_prompt ~question answered in
@@ -392,7 +406,26 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
                   emit_attempt_finished state ~request_id ~account:name ~status:None ~latency_ms:0 ~error:(Some e);
                   synthesize rest)
         in
-        let summary = synthesize candidates in
+        let parent = self () in
+        let synth_pid =
+          spawn (fun () ->
+            send parent (Committee_synth (synthesize candidates));
+            Ok ())
+        in
+        let synth_selector msg =
+          match msg with
+          | Committee_synth s -> Select (`Synth s)
+          | Task_cancel reason -> Select (`Cancel reason)
+          | _ -> Skip
+        in
+        let summary =
+          match await ~selector:synth_selector with
+          | `Synth s -> s
+          | `Cancel reason ->
+              send synth_pid (Task_cancel reason);
+              cancelled := Some reason;
+              None
+        in
         unwatch_task state ~request_id;
         match !cancelled with
         | Some reason -> cancelled_reply reason
@@ -405,7 +438,25 @@ let handle = fun (state : state) (ctx : Trail.ctx) (body : Json.t) ~(members : s
               (first, "（汇总失败：没有可用的汇总模型，以下为各家原文）\n\n" ^ sections)
         in
         emit_task_done ~answer:content state ~request_id ~chosen:(Some chosen) ~attempts:(n + 1) ~ok:true;
-        Trail.json ctx
-          (completion_json ~request_id ~content
-             [ ("oasis", Json.obj [ ("members", members_json); ("summarizer", Json.string chosen) ]) ])
+        ( Net.Http.Status.Ok,
+          completion_json ~request_id ~content
+            [ ("oasis", Json.obj [ ("members", members_json); ("summarizer", Json.string chosen) ]) ],
+          content )
+    in
+    (status, payload, text)
+    in
+    let stream_on =
+      Json.get_field "stream" body |> Option.and_then ~fn:Json.get_bool |> Option.unwrap_or ~default:false
+    in
+    if not stream_on then
+      let (status, payload, _) = finish () in
+      Trail.json ~status ctx payload
+    else
+      Trail.stream ctx (fun client_stream ->
+        ping := (fun () -> ignore (write_stream client_stream ": ping\n\n"));
+        let _ = write_stream client_stream ": ping\n\n" in
+        let (_, _, text) = finish () in
+        let _ = write_stream client_stream ("data: " ^ Json.to_string (delta_chunk_json text) ^ "\n\n") in
+        let _ = write_stream client_stream "data: [DONE]\n\n" in
+        Ok ())
   )
